@@ -153,7 +153,7 @@ tags = [
     SamTag('CS', 'Consensus score'),
     SamTag('TC', 'Tandem repeat count in this TF fragment'),
     SamTag('TS', 'Subpositions: (start, first repeat start, end)'),
-    SamTag('CR', 'Nanopore read name')
+    SamTag('CR', 'Nanopore :qread name')
 
 
 
