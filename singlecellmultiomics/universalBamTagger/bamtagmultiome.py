@@ -68,6 +68,7 @@ argparser.add_argument(
     action='store_true',
     help='Ignore truncation')
 argparser.add_argument('-custom_flags', type=str, default="MI,RX,bi,SM")
+argparser.add_argument('-sample_name', type=str, default="Cyclomic_TH")
 
 r_select = argparser.add_argument_group('Region selection')
 r_select.add_argument('-head', type=int)
@@ -358,7 +359,7 @@ def run_multiome_tagging(args):
             queryNameFlagger = CustomAssingmentQueryNameFlagger(
                 args.custom_flags.split(','))
         elif args.qflagger == 'cyclomics_th':
-            queryNameFlagger = RCA_Tidehunter_Flagger
+            queryNameFlagger = RCA_Tidehunter_Flagger(SMTag=args.sample_name)
         else:
             raise ValueError("Select from 'custom_flags, ..' ")
 

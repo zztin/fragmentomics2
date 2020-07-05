@@ -4,11 +4,12 @@ from singlecellmultiomics.utils import split_nth
 
 
 class RCA_Tidehunter_Flagger(DigestFlagger):
-    def __init__(self, **kwargs):
-        DigestFlagger.__init__(self, **kwargs)
+    def __init__(self, separator=None, origin_colons=None, SMTag = None, **kwargs):
         self.separator = "_"
+        self.SMTag = SMTag
         # separator count in filename. 0: there should be no "_" in the filename
-        self.origin_colons = 0
+        self.origin_colons = 1
+        DigestFlagger.__init__(self, **kwargs)
 
     def digest(self, reads):
         for read in reads:
@@ -19,6 +20,7 @@ class RCA_Tidehunter_Flagger(DigestFlagger):
             # set query name to the original nanopore read name
             read.query_name = origin
             # add original read name as a tag
+            read.set_tag("SM", self.SMTag)
             read.set_tag('CR', origin)
             # select useful added data and add tags
             repN, read_fl, start, end, tl, tc_copies, c_score, dir_td, sub_po  = rest.split(self.separator)
