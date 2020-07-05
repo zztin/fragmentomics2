@@ -33,3 +33,5 @@ _templates
 
 #Pycharm
 .idea/
+.DS_Store
+

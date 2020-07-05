@@ -12,6 +12,7 @@ from singlecellmultiomics.utils import is_main_chromosome
 from singlecellmultiomics.utils.submission import submit_job
 import singlecellmultiomics.alleleTools
 from singlecellmultiomics.universalBamTagger.customreads import CustomAssingmentQueryNameFlagger
+from singlecellmultiomics.universalBamTagger.rca_th import RCA_Tidehunter_Flagger
 import singlecellmultiomics.features
 from pysamiterators import CachedFasta,MatePairIteratorIncludingNonProper,MatePairIterator
 
@@ -51,7 +52,7 @@ argparser.add_argument(
     vasa (VASA transcriptomic data)
     cs (CELseq data, 1 and 2)
     cs_feature_counts (Single end, deduplicate using a bam file tagged using featurecounts, deduplicates a umi per gene)
-    fl_feature_counts (deduplicate using a bam file tagged using featurecounts, deduplicates based on fragment position)
+    fl_feature_counts (deduplicate using a bam file tagged using cd featurecounts, deduplicates based on fragment position)
     nla_taps (Data with digested by Nla III enzyme and methylation converted by TAPS)
     chic_taps (Data with digested by mnase enzyme and methylation converted by TAPS)
     nla_no_overhang (Data with digested by Nla III enzyme, without the CATG present in the reads)
@@ -356,6 +357,8 @@ def run_multiome_tagging(args):
         if args.qflagger == 'custom_flags':
             queryNameFlagger = CustomAssingmentQueryNameFlagger(
                 args.custom_flags.split(','))
+        elif args.qflagger == 'cyclomics_th':
+            queryNameFlagger = RCA_Tidehunter_Flagger
         else:
             raise ValueError("Select from 'custom_flags, ..' ")
 
@@ -445,6 +448,10 @@ def run_multiome_tagging(args):
         fragmentClass = singlecellmultiomics.fragment.Fragment
         # Write all reads
         yield_invalid = True
+
+    # elif args.method == 'cyclomics':
+    #     moleculeClass = singlecellmultiomics.molecule.CycMolecule
+    #     fragmentClass = singlecellmultiomics.fragment.CycFragment
 
     elif args.method == 'chic':
         moleculeClass = singlecellmultiomics.molecule.CHICMolecule
