@@ -146,6 +146,16 @@ tags = [
     SamTag('eH', 'ExonHits amount of bases aligned to exon'),
     SamTag('SP', 'IsSpliced'),
 
+    SamTag('TF', 'TideHunter Fragment ID'),
+    SamTag('CL', 'Full length nanopore read'),
+    SamTag('TL', 'Tandem repeat length'),
+    SamTag('TB', 'Tidehunter backbone direction,1=fwd, 2=rev, 0=not found'),
+    SamTag('CS', 'Consensus score'),
+    SamTag('TC', 'Tandem repeat count in this TF fragment'),
+    SamTag('TS', 'Subpositions: (start, first repeat start, end)'),
+    SamTag('CR', 'Nanopore read name')
+
+
 
 
 ]
