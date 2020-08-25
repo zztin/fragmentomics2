@@ -2,11 +2,21 @@
 # -*- coding: utf-8 -*-
 from singlecellmultiomics.molecule import Molecule
 from singlecellmultiomics.fragment import Fragment
+from singlecellmultiomics.utils.prefetch import initialise_dict, initialise
 from singlecellmultiomics.universalBamTagger import QueryNameFlagger
 import pysamiterators.iterators
 import collections
 import pysam
 
+
+class ReadIterator(pysamiterators.iterators.MatePairIterator):
+    def __next__(self):
+
+        try:
+            rec = next(self.iterator)
+            return tuple((rec, None))
+        except StopIteration:
+            raise
 
 class MoleculeIterator():
     """Iterate over molecules in pysam.AlignmentFile or reads from a generator or list
@@ -16,13 +26,13 @@ class MoleculeIterator():
         >>> !wget https://github.com/BuysDB/SingleCellMultiOmics/blob/master/data/mini_nla_test.bam.bai?raw=true -O mini_nla_test.bam.bai
         >>> import pysam
         >>> from singlecellmultiomics.molecule import NlaIIIMolecule, MoleculeIterator
-        >>> from singlecellmultiomics.fragment import NLAIIIFragment
+        >>> from singlecellmultiomics.fragment import NlaIIIFragment
         >>> import pysamiterators
         >>> alignments = pysam.AlignmentFile('mini_nla_test.bam')
         >>> for molecule in MoleculeIterator(
         >>>             alignments=alignments,
-        >>>             moleculeClass=singlecellmultiomics.molecule.NlaIIIMolecule,
-        >>>             fragmentClass=singlecellmultiomics.fragment.NLAIIIFragment,
+        >>>             molecule_class=singlecellmultiomics.molecule.NlaIIIMolecule,
+        >>>             fragment_class=singlecellmultiomics.fragment.NlaIIIFragment,
         >>>         ):
         >>>     break
         >>> molecule
@@ -132,8 +142,8 @@ class MoleculeIterator():
         Make sure the reads being supplied to the MoleculeIterator sorted by genomic coordinate! If the reads are not sorted set `check_eject_every=None`
     """
 
-    def __init__(self, alignments, moleculeClass=Molecule,
-                 fragmentClass=Fragment,
+    def __init__(self, alignments, molecule_class=Molecule,
+                 fragment_class=Fragment,
                  check_eject_every=10_000,  # bigger sizes are very speed benificial
                  molecule_class_args={},  # because the relative amount of molecules
                  # which can be ejected will be much higher
@@ -142,7 +152,7 @@ class MoleculeIterator():
                  pooling_method=1,
                  yield_invalid=False,
                  yield_overflow=True,
-                 queryNameFlagger=None,
+                 query_name_flagger=None,
                  every_fragment_as_molecule=False,
                  yield_secondary =  False,
                  yield_supplementary= False,
@@ -150,21 +160,23 @@ class MoleculeIterator():
                  iterator_class = pysamiterators.iterators.MatePairIterator,
                  skip_contigs=None,
                  progress_callback_function=None,
+                 min_mapping_qual = None,
+
                  **pysamArgs):
         """Iterate over molecules in pysam.AlignmentFile
 
         Args:
             alignments (pysam.AlignmentFile) or iterable yielding tuples: Alignments to extract molecules from
 
-            moleculeClass (pysam.FastaFile): Class to use for molecules.
+            molecule_class (pysam.FastaFile): Class to use for molecules.
 
-            fragmentClass (pysam.FastaFile): Class to use for fragments.
+            fragment_class (pysam.FastaFile): Class to use for fragments.
 
             check_eject_every (int): Check for yielding every N reads. When None is supplied, all reads are kept into memory making coordinate sorted data not required.
 
-            molecule_class_args (dict): arguments to pass to moleculeClass.
+            molecule_class_args (dict): arguments to pass to molecule_class.
 
-            fragment_class_args (dict): arguments to pass to fragmentClass.
+            fragment_class_args (dict): arguments to pass to fragment_class.
 
             perform_qflag (bool):  Make sure the sample/umi etc tags are copied
                 from the read name into bam tags
@@ -175,7 +187,7 @@ class MoleculeIterator():
 
             yield_overflow(bool) : When true overflow fragments are yielded as separate molecules
 
-            queryNameFlagger(class) : class which contains the method digest(self, reads) which accepts pysam.AlignedSegments and adds at least the SM and RX tags
+            query_name_flagger(class) : class which contains the method digest(self, reads) which accepts pysam.AlignedSegments and adds at least the SM and RX tags
 
             every_fragment_as_molecule(bool): When set to true all valid fragments are emitted as molecule with one associated fragment, this is a way to disable deduplication.
 
@@ -185,21 +197,23 @@ class MoleculeIterator():
 
             skip_contigs (set) : Contigs to skip
 
+            min_mapping_qual(int) : Dont process reads with a mapping quality lower than this value. These reads are not yielded as molecules!
+
             **kwargs: arguments to pass to the pysam.AlignmentFile.fetch function
 
         Yields:
             molecule (Molecule): Molecule
         """
-        if queryNameFlagger is None:
-            queryNameFlagger = QueryNameFlagger()
-        self.queryNameFlagger = queryNameFlagger
+        if query_name_flagger is None:
+            query_name_flagger = QueryNameFlagger()
+        self.query_name_flagger = query_name_flagger
         self.skip_contigs = skip_contigs if skip_contigs is not None else set()
         self.alignments = alignments
-        self.moleculeClass = moleculeClass
-        self.fragmentClass = fragmentClass
+        self.molecule_class = molecule_class
+        self.fragment_class = fragment_class
         self.check_eject_every = check_eject_every
-        self.molecule_class_args = molecule_class_args
-        self.fragment_class_args = fragment_class_args
+        self.molecule_class_args = initialise_dict(molecule_class_args)
+        self.fragment_class_args = initialise_dict(fragment_class_args)
         self.perform_qflag = perform_qflag
         self.pysamArgs = pysamArgs
         self.matePairIterator = None
@@ -210,7 +224,7 @@ class MoleculeIterator():
         self.progress_callback_function = progress_callback_function
         self.iterator_class = iterator_class
         self.max_buffer_size=max_buffer_size
-
+        self.min_mapping_qual = min_mapping_qual
 
         self._clear_cache()
 
@@ -229,7 +243,7 @@ class MoleculeIterator():
             raise NotImplementedError()
 
     def __repr__(self):
-        return f"""Molecule Iterator, generates fragments from {self.fragmentClass} into molecules based on {self.moleculeClass}.
+        return f"""Molecule Iterator, generates fragments from {self.fragment_class} into molecules based on {self.molecule_class}.
         Yielded {self.yielded_fragments} fragments, {self.waiting_fragments} fragments are waiting to be ejected. {self.deleted_fragments} fragments rejected.
         {self.get_molecule_cache_size()} molecules cached.
         Mate pair iterator: {str(self.matePairIterator)}"""
@@ -246,7 +260,7 @@ class MoleculeIterator():
 
     def __iter__(self):
         if self.perform_qflag:
-            qf = self.queryNameFlagger
+            qf = self.query_name_flagger
 
         self._clear_cache()
         self.waiting_fragments = 0
@@ -262,7 +276,7 @@ class MoleculeIterator():
 
         for iteration,reads in enumerate(self.matePairIterator):
 
-            if self.progress_callback_function is not None and iteration%100==0:
+            if self.progress_callback_function is not None and iteration%500==0:
                 self.progress_callback_function(iteration, self, reads)
 
             if isinstance(reads, pysam.AlignedSegment):
@@ -286,15 +300,24 @@ class MoleculeIterator():
                 if not keep:
                     continue
 
+            if self.min_mapping_qual is not None:
+                keep = True
+                for read in reads:
+                    if read is not None and read.mapping_quality<self.min_mapping_qual:
+                        self.deleted_fragments+=1
+                        keep=False
+                if not keep:
+                    continue
+
             # Make sure the sample/umi etc tags are placed:
             if self.perform_qflag:
                 qf.digest([R1, R2])
 
-            fragment = self.fragmentClass([R1, R2], **self.fragment_class_args)
+            fragment = self.fragment_class([R1, R2], **self.fragment_class_args)
 
             if not fragment.is_valid():
                 if self.yield_invalid:
-                    m = self.moleculeClass(
+                    m = self.molecule_class(
                         fragment, **self.molecule_class_args)
                     m.__finalise__()
                     yield m
@@ -303,7 +326,7 @@ class MoleculeIterator():
                 continue
 
             if self.every_fragment_as_molecule:
-                m = self.moleculeClass(fragment, **self.molecule_class_args)
+                m = self.molecule_class(fragment, **self.molecule_class_args)
                 m.__finalise__()
                 yield m
                 continue
@@ -323,7 +346,7 @@ class MoleculeIterator():
             except OverflowError:
                 # This means the fragment does belong to a molecule, but the molecule does not accept any more fragments.
                 if self.yield_overflow:
-                    m = self.moleculeClass(fragment, **self.molecule_class_args)
+                    m = self.molecule_class(fragment, **self.molecule_class_args)
                     m.set_rejection_reason('overflow')
                     m.__finalise__()
                     yield m
@@ -333,11 +356,11 @@ class MoleculeIterator():
 
             if not added:
                 if self.pooling_method == 0:
-                    self.molecules.append(self.moleculeClass(
+                    self.molecules.append(self.molecule_class(
                         fragment, **self.molecule_class_args))
                 else:
                     self.molecules_per_cell[fragment.match_hash].append(
-                        self.moleculeClass(fragment, **self.molecule_class_args)
+                        self.molecule_class(fragment, **self.molecule_class_args)
                     )
 
             self.waiting_fragments += 1

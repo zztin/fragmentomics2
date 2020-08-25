@@ -112,20 +112,36 @@ def read_should_be_counted(read, args, blacklist_dic = None):
     bool
     """
 
+    if args.r1only and read.is_read2:
+        return False
+    if args.r2only and read.is_read1:
+        return False
 
-# Read is empty
     if args.filterMP:
         if not read.has_tag('mp'):
             return False
         if read.get_tag('mp')=='unique':
             return True
         return False
-      
+
     if read is None or read.is_qcfail:
         return False
 
     # Mapping quality below threshold
     if read.mapping_quality < args.minMQ:
+        return False
+
+
+    if args.proper_pairs_only and not read.is_proper_pair:
+        return False
+
+    if args.no_indels and ('I' in read.cigarstring or 'D' in read.cigarstring):
+        return False
+
+    if args.max_base_edits is not None and read.has_tag('NM') and int(read.get_tag('NM'))>args.max_base_edits:
+        return False
+
+    if args.no_softclips and 'S' in read.cigarstring:
         return False
 
     # Read has alternative hits
@@ -177,10 +193,16 @@ def assignReads(
     sample = tuple(readTag(read, tag) for tag in sampleTags)
 
     # Decide how many counts this read yields
-    if args.doNotDivideFragments:
+    countToAdd = 1
+
+    if args.r1only or args.r2only:
         countToAdd = 1
-    else:
-        countToAdd = (0.5 if (read.is_paired and not args.dedup) else 1)
+    elif not args.doNotDivideFragments: # not not = True
+        # IF the read is paired, and the mate mapped, we should count 0.5, and will end up
+        # with 1 in total
+
+        countToAdd = (0.5 if (read.is_paired and not read.mate_is_unmapped) else 1)
+
     assigned += 1
 
     if args.divideMultimapping:
@@ -425,6 +447,11 @@ def create_count_table(args, return_df=False):
         featureTags = args.joinedFeatureTags.split(',')
         joinFeatures = True
 
+        # When -byValue is used, and joined feature tags are supplied, automatically append the args.byValue tag, otherwise it will get lost
+        if args.byValue is not None and len(featureTags)>0 and args.byValue not in featureTags:
+            featureTags.append(args.byValue)
+
+
     if args.bin is not None and args.binTag not in featureTags:
         print("The bin tag was not supplied as feature, automatically appending the bin feature.")
         featureTags.append(args.binTag)
@@ -438,9 +465,9 @@ def create_count_table(args, return_df=False):
         collections.Counter)  # cell->feature->count
 
     if args.blacklist is not None:
-        # create blacklist dictionary {chromosome : [ (start1, end1), ..., (startN, endN) ]} 
+        # create blacklist dictionary {chromosome : [ (start1, end1), ..., (startN, endN) ]}
         # used to check each read and exclude if it is within any of these start end sites
-        # 
+        #
         blacklist_dic = {}
         print("Creating blacklist dictionary:")
         with open(args.blacklist, mode='r') as blfile:
@@ -589,6 +616,17 @@ if __name__ == '__main__':
         type=int,
         help='Run the algorithm only on the first N reads to check if the result looks like what you expect.')
 
+
+    argparser.add_argument(
+        '--r1only',
+        action='store_true',
+        help='Only count R1')
+
+    argparser.add_argument(
+        '--r2only',
+        action='store_true',
+        help='Only count R2')
+
     argparser.add_argument(
         '--splitFeatures',
         action='store_true',
@@ -608,21 +646,7 @@ if __name__ == '__main__':
         '--doNotDivideFragments',
         action='store_true',
         help='When used every read is counted once, a fragment will count as two reads. 0.5 otherwise')
-    multimapping_args.add_argument(
-        '-minMQ',
-        type=int,
-        default=0,
-        help="minimum mapping quality")
 
-    multimapping_args.add_argument(
-        '--filterMP',
-        action= 'store_true',
-        help="Filter reads which are not uniquely mappable")
-
-    multimapping_args.add_argument(
-        '--filterXA',
-        action='store_true',
-        help="Do not count reads where the XA (alternative hits) tag has been set for a non-alternative locus.")
 
     binning_args = argparser.add_argument_group('Binning', '')
     #binning_args.add_argument('-offset', type=int, default=0, help="Add offset to bin. If bin=1000, offset=200, f=1999 -> 1200. f=4199 -> 3200")
@@ -655,10 +679,52 @@ if __name__ == '__main__':
         type=str,
         help="Bed file containing 3 columns, chromo, start, end to be read for fetching counts")
 
-    argparser.add_argument(
+
+
+    filters = argparser.add_argument_group('Filters', '')
+
+    filters.add_argument(
+        '--proper_pairs_only',
+        action='store_true',
+        help='Only count reads mapped in a proper pair (within the expected insert size range)')
+
+    filters.add_argument(
+        '--no_softclips',
+        action='store_true',
+        help='Only count reads without softclips')
+
+    filters.add_argument(
+        '-max_base_edits',
+        type=int,
+        help='Count reads with at most this value of bases being different than the reference')
+
+
+    filters.add_argument(
+        '--no_indels',
+        action='store_true',
+        help='Only count reads without indels')
+
+    filters.add_argument(
         '--dedup',
         action='store_true',
         help='Count only the first occurence of a molecule. Requires RC tag to be set. Reads without RC tag will be ignored!')
+
+    filters.add_argument(
+        '-minMQ',
+        type=int,
+        default=0,
+        help="minimum mapping quality")
+
+    filters.add_argument(
+        '--filterMP',
+        action= 'store_true',
+        help="Filter reads which are not uniquely mappable, this is based on presence on the `mp` tag, which can be generated by bamtagmultiome.py ")
+
+    filters.add_argument(
+        '--filterXA',
+        action='store_true',
+        help="Do not count reads where the XA (alternative hits) tag has been set for a non-alternative locus.")
+
     argparser.add_argument(
         '--noNames',
         action='store_true',

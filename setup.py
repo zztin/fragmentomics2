@@ -38,11 +38,14 @@ setup(
         'singlecellmultiomics.features',
         'singlecellmultiomics.fragment',
         'singlecellmultiomics.fastqProcessing',
+        'singlecellmultiomics.fastaProcessing',
         'singlecellmultiomics.libraryDetection',
         'singlecellmultiomics.libraryProcessing',
         'singlecellmultiomics.modularDemultiplexer',
         'singlecellmultiomics.molecule',
+        'singlecellmultiomics.methylation',
         'singlecellmultiomics.pyutils',
+        'singlecellmultiomics.variants',
         'singlecellmultiomics.tags',
         'singlecellmultiomics.statistic',
         'singlecellmultiomics.tagtools',
@@ -62,6 +65,7 @@ setup(
 
         # Tagging
         'singlecellmultiomics/universalBamTagger/universalBamTagger.py',
+        'singlecellmultiomics/universalBamTagger/bamtagmultiome_multi.py',
         'singlecellmultiomics/universalBamTagger/bamtagmultiome.py',
         'singlecellmultiomics/universalBamTagger/tapsTagger.py',
         'singlecellmultiomics/universalBamTagger/tapsTabulator.py',
@@ -69,25 +73,32 @@ setup(
 
         # Bam processing:
         'singlecellmultiomics/bamProcessing/bamTabulator.py',
+        'singlecellmultiomics/bamProcessing/bamAnalyzeCutDistances.py',
         'singlecellmultiomics/bamProcessing/bamSplitByTag.py',
         'singlecellmultiomics/bamProcessing/bamReadGroupFormat.py',
         'singlecellmultiomics/bamProcessing/bamToCountTable.py',
         'singlecellmultiomics/bamProcessing/bamCopyNumber.py',
         'singlecellmultiomics/bamProcessing/bamExtractSamples.py',
         'singlecellmultiomics/bamProcessing/bamToMethylationAndCopyNumber.py',
+        'singlecellmultiomics/bamProcessing/bamToMethylationCalls.py',
         'singlecellmultiomics/bamProcessing/bamMappingRate.py',
         'singlecellmultiomics/bamProcessing/bamFilter.py',
         'singlecellmultiomics/bamProcessing/bamPlotRTstats.py',
         'singlecellmultiomics/bamProcessing/bamPlateVisualisation.py',
         'singlecellmultiomics/bamProcessing/bamFeatureDensityVisualisation.py',
+        'singlecellmultiomics/bamProcessing/bamMethylationCutDistance.py',
         'singlecellmultiomics/bamProcessing/bamDuprate.py',
         'singlecellmultiomics/bamProcessing/bamExtractRandomPrimerStats.py',
         'singlecellmultiomics/bamProcessing/bamToRNACounts.py',
         'singlecellmultiomics/bamProcessing/structureTensor.py',
+        'singlecellmultiomics/bamProcessing/bamCompare.py',
         'singlecellmultiomics/bamProcessing/variantStats.py',
         'singlecellmultiomics/bamProcessing/bamExtractVariants.py',
         'singlecellmultiomics/bamProcessing/bamMatchGATKBQSRReport.py',
         'singlecellmultiomics/bamProcessing/bamBinCounts.py',
+        'singlecellmultiomics/bamProcessing/split_double_BAM.py',
+        'singlecellmultiomics/bamProcessing/bamOverseq.py',
+        'singlecellmultiomics/utils/base_call_covariates.py',
 
         # Library processing:
         'singlecellmultiomics/libraryProcessing/libraryStatistics.py',
@@ -97,9 +108,15 @@ setup(
         # Feature conversion:
         'singlecellmultiomics/features/exonGTFtoIntronGTF.py',
 
+        # Variants:
+        'singlecellmultiomics/variants/postProcessVariants.py',
+        'singlecellmultiomics/variants/vcfFilterAlleleFreq.py',
+        'singlecellmultiomics/variants/vcfMutProfiler.py',
+        'singlecellmultiomics/variants/plotCovariates.py',
 
         # Utility: (SGE wrapper)
         'singlecellmultiomics/utils/submission.py',
+        'singlecellmultiomics/utils/ftp_upload.py',
 
         #Worfklow
         'singlecellmultiomics/snakemake_workflows/scmo_workflow.py',
@@ -109,10 +126,11 @@ setup(
         ],
 
   install_requires=[
-       'pysam>=0.15.3','numpy>=1.16.4','pandas>=0.25.0','colorama',
-       'pysamiterators>=1.7','more-itertools','matplotlib','tabulate',
-       'wheel','setuptools>=40.8.0','scikit-learn>=0.21.3','seaborn',
-       'biopython>=1.71','pytest>=5.0.0','pytest-runner','snakemake>=5.8.1','lxml' #,'tensorflow>=1.14.0'
+       'pysam>=0.15.3','numpy>=1.16.1','pandas>=0.25.0','colorama',
+       'pysamiterators>=1.8','more-itertools','matplotlib','tabulate',
+       'wheel','setuptools>=40.8.0','scikit-learn>=0.21.3','seaborn', 'statsmodels',
+       'biopython>=1.71','pytest>=5.0.0','pytest-runner','snakemake>=5.8.1','lxml',
+       'statsmodels' #,'tensorflow>=1.14.0'
    ],
     setup_requires=["pytest-runner"],
     tests_require=["pytest"],

@@ -35,3 +35,5 @@ _templates
 .idea/
 .DS_Store
 
+dev/
+data/test

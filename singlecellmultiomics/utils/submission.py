@@ -45,12 +45,15 @@ def create_job_file_paths(target_directory,job_alias=None, prefix=None, job_file
 
 def generate_job_script(scheduler, jobfile,stderr, stdout, job_name, memory_gb, working_directory, time_h, threads_n, email, mail_when_finished=False, copy_env=True ):
     if scheduler=='local':
+
         return [f'cd {working_directory}']
+
     if scheduler=='slurm':
         jobData = [
             '#!/bin/sh',
             '#SBATCH -J %s' % job_name, # Sets job name
             '#SBATCH -n %s' % threads_n,
+            '#SBATCH -N 1', # Run on a single node
             '#SBATCH --time %s:00:00' % str(time_h).zfill(2),
             '#SBATCH --mem %sG' % memory_gb,
             '#SBATCH --chdir %s' % (working_directory),
@@ -138,6 +141,15 @@ def submit_job(command,  target_directory,  working_directory,
 
     qsub_available = (distutils.spawn.find_executable("qsub") is not None)
     sbatch_available = (distutils.spawn.find_executable("sbatch") is not None)
+
+    if scheduler == 'auto':
+        if qsub_available:
+            scheduler = 'sge'
+        elif sbatch_available:
+            scheduler = 'slurm'
+        else:
+            scheduler = 'local'
+
 
     if job_alias is None and job_name is None:
         job_name = 'J%s' % str(uuid.uuid4())

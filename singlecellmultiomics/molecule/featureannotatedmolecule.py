@@ -2,6 +2,27 @@ from singlecellmultiomics.molecule.molecule import Molecule
 import collections
 import pandas as pd
 
+class TranscriptMolecule(Molecule):
+
+    def __init__(self, fragment,
+             **kwargs):
+        self.genes=set()
+        Molecule.__init__(self, fragment, **kwargs)
+
+
+    def _add_fragment(self, fragment):
+
+        self.genes.update(fragment.genes)
+        Molecule._add_fragment(self, fragment)
+
+    def write_tags(self):
+
+        for frag in self:
+            frag.write_tags()
+
+        Molecule.write_tags(self)
+
+
 
 class FeatureAnnotatedMolecule(Molecule):
     """Molecule which is annotated with features (genes/exons/introns, .. )
@@ -51,6 +72,8 @@ class FeatureAnnotatedMolecule(Molecule):
             self.is_spliced = False
         else:
             self.is_spliced = is_spliced
+
+
 
     def set_intron_exon_features(self):
         if not self.is_annotated:
@@ -133,16 +156,71 @@ class FeatureAnnotatedMolecule(Molecule):
 
         return pd.DataFrame(tabulated_hits)
 
+
+    def write_tags_to_psuedoreads(self, reads, call_super=True):
+        # @ todo needs refactor; the psuedoread should just be a Fragment too, solves all issues
+        if call_super:
+            Molecule.write_tags_to_psuedoreads(self, reads)
+
+        for read in reads:
+            if len(self.exons) > 0:
+                read.set_tag('EX', ','.join(sorted([str(x) for x in self.exons])))
+            else:
+                read.set_tag('EX', None)
+
+            if len(self.introns) > 0:
+                read.set_tag('IN', ','.join(
+                    sorted([str(x) for x in self.introns])))
+            else:
+                read.set_tag('IN', None)
+
+            if len(self.genes) > 0:
+                read.set_tag('GN', ','.join(sorted([str(x) for x in self.genes])))
+            else:
+                read.set_tag('GN', None)
+
+            if len(self.junctions) > 0:
+                read.set_tag('JN', ','.join(
+                    sorted([str(x) for x in self.junctions])))
+                # Is transcriptome
+                read.set_tag('IT', 1)
+            elif len(self.genes) > 0:
+                # Maps to gene but not junction
+                read.set_tag('IT', 0.5)
+                read.set_tag('JN', None)
+            else:
+                # Doesn't map to gene
+                read.set_tag('IT', 0)
+                read.set_tag('JN', None)
+
+            if self.is_spliced is True:
+                read.set_tag('SP', True)
+            elif self.is_spliced is False:
+                read.set_tag('SP', False)
+            if len(self.exon_hit_gene_names):
+                read.set_tag('gn', ';'.join(list(self.exon_hit_gene_names)))
+            else:
+                read.set_tag('gn', None)
+
     def write_tags(self):
         Molecule.write_tags(self)
 
         if len(self.exons) > 0:
             self.set_meta('EX', ','.join(sorted([str(x) for x in self.exons])))
+        else:
+            self.set_meta('EX',None)
+
         if len(self.introns) > 0:
             self.set_meta('IN', ','.join(
                 sorted([str(x) for x in self.introns])))
+        else:
+            self.set_meta('IN',None)
+
         if len(self.genes) > 0:
             self.set_meta('GN', ','.join(sorted([str(x) for x in self.genes])))
+        else:
+            self.set_meta('GN',None)
+
         if len(self.junctions) > 0:
             self.set_meta('JN', ','.join(
                 sorted([str(x) for x in self.junctions])))
@@ -151,15 +229,20 @@ class FeatureAnnotatedMolecule(Molecule):
         elif len(self.genes) > 0:
             # Maps to gene but not junction
             self.set_meta('IT', 0.5)
+            self.set_meta('JN',None)
         else:
             # Doesn't map to gene
             self.set_meta('IT', 0)
+            self.set_meta('JN', None)
+
         if self.is_spliced is True:
             self.set_meta('SP', True)
         elif self.is_spliced is False:
             self.set_meta('SP', False)
         if len(self.exon_hit_gene_names):
             self.set_meta('gn', ';'.join(list(self.exon_hit_gene_names)))
+        else:
+            self.set_meta('gn',None)
 
     def annotate(self, method=0):
         """

@@ -2,7 +2,7 @@ from singlecellmultiomics.fragment import Fragment
 from singlecellmultiomics.utils.sequtils import hamming_distance
 
 
-class NLAIIIFragment(Fragment):
+class NlaIIIFragment(Fragment):
     def __init__(self,
                  reads,
                  R1_primer_length=4,
@@ -11,6 +11,7 @@ class NLAIIIFragment(Fragment):
                  umi_hamming_distance=1,
                  invert_strand=False,
                  no_overhang =False, # CATG is present OUTSIDE the fragment
+                 cut_location_offset=-4,
                  reference=None, #Reference is required when no_overhang=True
                  allow_cycle_shift=False,
                  no_umi_cigar_processing=False, **kwargs
@@ -19,6 +20,7 @@ class NLAIIIFragment(Fragment):
         self.no_overhang = no_overhang
         self.reference = reference
         self.allow_cycle_shift = allow_cycle_shift
+        self.cut_location_offset = cut_location_offset
         self.no_umi_cigar_processing= no_umi_cigar_processing
         if self.no_overhang and reference  is None:
             raise ValueError('Supply a reference handle when no_overhang=True')
@@ -136,8 +138,26 @@ class NLAIIIFragment(Fragment):
             return None
 
         if self.no_overhang:
-            forward_motif = self.reference.fetch(R1.reference_name,  R1.reference_start-4,  R1.reference_start)
-            rev_motif = self.reference.fetch(R1.reference_name, R1.reference_end, R1.reference_end+4)
+            # scan 3 bp of sequence for CATG
+            scan_extra_bp = 3
+            if R1.is_reverse:
+                rev_motif = self.reference.fetch(R1.reference_name, R1.reference_end-self.cut_location_offset, R1.reference_end+4-self.cut_location_offset+scan_extra_bp)
+                forward_motif=None
+                if 'CATG' in rev_motif:
+                    rev_motif='CATG'
+                else:
+                    self.set_recognized_sequence(rev_motif)
+                    return None
+            else:
+                rev_motif=None
+                forward_motif = self.reference.fetch(R1.reference_name,  R1.reference_start-4+self.cut_location_offset-scan_extra_bp,  R1.reference_start+self.cut_location_offset)
+                if 'CATG' in forward_motif:
+                    forward_motif='CATG'
+                else:
+                    self.set_recognized_sequence(forward_motif)
+                    return None
+
+
         else:
             forward_motif = R1.seq[:4]
             rev_motif = R1.seq[-4:]

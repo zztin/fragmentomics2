@@ -6,9 +6,16 @@ import collections
 import functools
 import gzip
 import os
+from singlecellmultiomics.utils import Prefetcher
 
+def get_allele_dict():
+    return collections.defaultdict(nested_set_defaultdict)
+def nested_set_defaultdict():
+    return collections.defaultdict( set_defaultdict )
+def set_defaultdict():
+    return collections.defaultdict (set)
 
-class AlleleResolver:
+class AlleleResolver(Prefetcher):
 
     def clean_vcf_name(self, vcffile):
         # Convert file name to string if it is not
@@ -61,11 +68,13 @@ class AlleleResolver:
 
 
         """
+        self.args = locals().copy()
+        del self.args['self']
+
         self.ignore_conversions = ignore_conversions
         self.phased = phased
         self.verbose = verbose
-        self.locationToAllele = collections.defaultdict(lambda: collections.defaultdict(
-            lambda: collections.defaultdict(set)))  # chrom -> pos-> base -> sample(s)
+        self.locationToAllele = get_allele_dict()  # chrom -> pos-> base -> sample(s)
         self.select_samples = select_samples
         self.region_start = region_start
         self.region_end = region_end
@@ -95,7 +104,7 @@ class AlleleResolver:
                 raise NotImplementedError(
                     "Sample selection is not implemented for non proper VCF")
             lazyLoad = False
-        # self.locationToAllele = collections.defaultdict( lambda:
+
         # collections.defaultdict(set) ) #(chrom, pos)-> base -> sample(s)
 
         if uglyMode:
@@ -164,10 +173,30 @@ class AlleleResolver:
 
                 self.locationToAllele[chrom][position][base] = set(samples.split(','))
 
+
+
+    def instance(self, arg_update):
+        if 'self' in self.args:
+            del self.args['self']
+        clone = AlleleResolver(**self.args)
+        return clone
+
+
+    def prefetch(self, contig, start, end):
+
+        clone = self.instance({'region_start':start, 'region_end':end})
+
+        #print(f'Prefetching {contig}:{start}-{end}')
+        try:
+            self.fetchChromosome(self.vcffile, contig, True)
+        except ValueError:
+            # This means the chromosome is not available
+            pass
+        return clone
+
     def fetchChromosome(self, vcffile, chrom, clear=False):
         if clear:
-            self.locationToAllele = collections.defaultdict(lambda: collections.defaultdict(
-                lambda: collections.defaultdict(set)))  # chrom -> pos-> base -> sample(s)
+            self.locationToAllele = get_allele_dict()  # chrom -> pos-> base -> sample(s)
 
         vcffile = self.clean_vcf_name(vcffile)
         # allocate:
@@ -214,36 +243,44 @@ class AlleleResolver:
                         set)  # base -> samples
 
                     if self.phased:  # variants are phased, assign a random allele
-                        samples_assigned = set()
-                        most_assigned_base = 0
-                        monomorphic=False
-                        for sample, sampleData in rec.samples.items():
 
-                            if self.select_samples is not None and sample not in self.select_samples:
-                                continue
-                            for base in sampleData.alleles:
-                                if base is None:
-                                    # This site is monomorphic:
-                                    monomorphic=True
+                        if len(rec.samples)==0: # File without samples
+
+                            bases_to_alleles[rec.ref]=set('r')
+                            bases_to_alleles[rec.alts[0]]=set('a')
+                            self.locationToAllele[rec.chrom][rec.pos - 1]=bases_to_alleles
+
+                        else:
+                            samples_assigned = set()
+                            most_assigned_base = 0
+                            monomorphic=False
+                            for sample, sampleData in rec.samples.items():
+
+                                if self.select_samples is not None and sample not in self.select_samples:
                                     continue
-                                if len(base) == 1:
-                                    bases_to_alleles[base].add(sample)
-                                    used = True
-                                    samples_assigned.add(sample)
-                                else:  # This location cannot be trusted:
+                                for base in sampleData.alleles:
+                                    if base is None:
+                                        # This site is monomorphic:
+                                        monomorphic=True
+                                        continue
+                                    if len(base) == 1:
+                                        bases_to_alleles[base].add(sample)
+                                        used = True
+                                        samples_assigned.add(sample)
+                                    else:  # This location cannot be trusted:
+                                        bad = True
+                            # We can prune this site if all samples are associated
+                            # with the same base
+                            if self.select_samples is not None and used:
+                                if len(samples_assigned) != len(
+                                        self.select_samples):
+                                    # The site is not informative
                                     bad = True
-                        # We can prune this site if all samples are associated
-                        # with the same base
-                        if self.select_samples is not None and used:
-                            if len(samples_assigned) != len(
-                                    self.select_samples):
-                                # The site is not informative
+                            if monomorphic and len(bases_to_alleles)>0:
+                                bad=False
+                            elif len(bases_to_alleles) < 2:
                                 bad = True
-                        if monomorphic and len(bases_to_alleles)>0:
-                            bad=False
-                        elif len(bases_to_alleles) < 2:
-                            bad = True
-                            # The site is not informative
+                                # The site is not informative
                     else:  # not phased
                         if not all(
                                 len(allele) == 1 for allele in rec.alleles):  # only select SNVs
