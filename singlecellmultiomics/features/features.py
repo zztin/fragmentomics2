@@ -6,7 +6,10 @@ import itertools
 import re
 import functools
 import pysam
-
+from singlecellmultiomics.utils import Prefetcher
+from copy import copy
+import collections
+import pandas as pd
 
 def get_gene_id_to_gene_name_conversion_table(annotation_path_exons,
                                               featureTypes=['gene_name']):
@@ -19,7 +22,7 @@ def get_gene_id_to_gene_name_conversion_table(annotation_path_exons,
 
     Returns:
         conversion_dict(dict) : { gene_id : 'firstFeature_secondFeature'}
-        """
+    """
     conversion_table = {}
     with (gzip.open(annotation_path_exons, 'rt') if annotation_path_exons.endswith('.gz') else open(annotation_path_exons, 'r')) as t:
         for i, line in enumerate(t):
@@ -41,9 +44,10 @@ def get_gene_id_to_gene_name_conversion_table(annotation_path_exons,
     return conversion_table
 
 
-class FeatureContainer:
+class FeatureContainer(Prefetcher):
 
-    def __init__(self):
+    def __init__(self, verbose=False):
+        self.args = locals().copy()
         self.startCoordinates = {}  # dict of np.array()
         self.features = {}
         self.endCoordinates = {}
@@ -51,26 +55,72 @@ class FeatureContainer:
         # When set to true, the class will be (very) verbose
         self.debug = False
         self.remapKeys = {}  # {'chrMT':'chrM','MT':'chrM'}  Use this to convert chromosome names between the GTF and requested locations
-        self.verbose = False
+        self.verbose = verbose
+        self.preload_list = []
 
     def debugMsg(self, msg):
         if self.verbose:
             print(msg)
 
+    def __repr__(self):
+        s= 'FeatureContainer,'
+        if len(self.preload_list):
+            s+= ' Preloaded files:\n'
+            for f in self.preload_list:
+                s+=str(f)+'\n'
+        if len(self.features):
+            s+=f'Features in memory for {len(self.features)} contigs\n'
+        else:
+            s+='No features in memory\n'
+        return s
+
     def __len__(self):
         return sum(len(f) for f in self.features.values())
 
+
+    def preload_GTF(self, **kwargs):
+        self.preload_list.append( {'gtf':kwargs} )
+
+
+    def instance(self, arg_update):
+        if 'self' in self.args:
+            del self.args['self']
+        clone = FeatureContainer(**self.args)
+        for cmd in self.preload_list:
+            for preload_type, kwargs in cmd.items():
+                kwargs_copy = copy(kwargs)
+                kwargs_copy.update(arg_update)
+                if preload_type=='gtf':
+                    clone.loadGTF(**kwargs_copy)
+                else:
+                    raise ValueError()
+        return clone
+
+
+    def prefetch(self, contig, start, end):
+        return self.instance( {'contig':contig, 'region_start':start,  'region_end':end})
+
+
     def loadGTF(self, path, thirdOnly=None, identifierFields=['gene_id'],
                 ignChr=False, select_feature_type=None, exon_select=None,
-                head=None, store_all=False, contig=None):
+                head=None, store_all=False, contig=None, offset=-1,
+                region_start=None, region_end=None):
         """Load annotations from a GTF file.
         ignChr: ignore the chr part of the Annotation chromosome
         """
+        if region_end is not None or region_start is not None:
+            assert contig is not None and region_end is not None and region_start is not None
+
         self.loadedGtfFeatures = thirdOnly
         #pattern = '^(.*) "(.*).*"'
         #prog = re.compile(pattern)
         if self.verbose:
-            print("Loading %s" % path)
+            if contig is None:
+                print(f"Loading {path} completely")
+            elif region_start is None:
+                print(f"Loading {path}, for contig {contig}")
+            else:
+                print(f"Loading {path}, for contig {contig}:{region_start}-{region_end}")
         added = 0
         with (gzip.open(path, 'rt') if path.endswith('.gz') else open(path, 'r')) as f:
             for line_id, line in enumerate(f):
@@ -140,21 +190,24 @@ class FeatureContainer:
                         featureName = ','.join(
                             [keyValues.get(i, 'none') for i in identifierFields if i in keyValues])
 
+
+                    start = int( parts[3] ) + offset
+                    end = int( parts[4] ) + offset
+
+                    if region_end is not None and region_start is not None and ( end<region_start or start>region_end):
+                        continue
+
                     if store_all:
                         keyValues['type'] = parts[2]
                         self.addFeature(
                             self.remapKeys.get(
-                                chromosome, chromosome), int(
-                                parts[3]), int(
-                                parts[4]), strand=parts[6], name=featureName, data=tuple(
+                                chromosome, chromosome),start,end, strand=parts[6], name=featureName, data=tuple(
                                 keyValues.items()))
 
                     else:
                         self.addFeature(
                             self.remapKeys.get(
-                                chromosome, chromosome), int(
-                                parts[3]), int(
-                                parts[4]), strand=parts[6], name=featureName, data=','.join(
+                                chromosome, chromosome), start,end, strand=parts[6], name=featureName, data=','.join(
                                 (':'.join(
                                     ('type', parts[2])), ':'.join(
                                     ('gene_id', keyValues['gene_id'])))))
@@ -755,6 +808,160 @@ def massIdConvert(
                     converted[identifier].append(convertedTo)
 
     return(converted)
+
+
+class FeatureAnnotatedObject():
+
+    def __init__(self, features, stranded, capture_locations, auto_set_intron_exon_features ):
+
+        self.features = features
+        self.hits = collections.defaultdict(set)  # feature -> hit_bases
+        self.stranded = stranded
+        self.is_annotated = False
+        self.capture_locations = capture_locations
+        if capture_locations:
+            self.feature_locations = {} #feature->locations (chrom,start,end, strand)
+
+        self.junctions = set()
+        self.genes = set()
+        self.introns = set()
+        self.exons = set()
+        self.exon_hit_gene_names = set()  # readable names
+        self.is_spliced = None
+
+        if auto_set_intron_exon_features:
+            self.set_intron_exon_features()
+
+
+    def set_spliced(self, is_spliced):
+        """ Set wether the transcript is spliced, False has priority over True """
+        if self.is_spliced and not is_spliced:
+            # has already been set
+            self.is_spliced = False
+        else:
+            self.is_spliced = is_spliced
+
+    def get_hit_df(self):
+        """Obtain dataframe with hits
+        Returns:
+            pd.DataFrame
+        """
+        if not self.is_annotated:
+            self.set_intron_exon_features()
+
+        d = {}
+        tabulated_hits = []
+        for hit, locations in self.hits.items():
+            if not isinstance(hit, tuple):
+                continue
+            meta = dict(list(hit))
+            for location in locations:
+                location_dict = {
+                    'chromosome': location[0],
+                    'start': location[1][0],
+                    'end': location[1][1]}
+                location_dict.update(meta)
+                tabulated_hits.append(location_dict)
+
+        return pd.DataFrame(tabulated_hits)
+
+    def write_tags(self):
+
+        if len(self.exons) > 0:
+            self.set_meta('EX', ','.join(sorted([str(x) for x in self.exons])))
+        else:
+            self.set_meta('EX',None)
+
+        if len(self.introns) > 0:
+            self.set_meta('IN', ','.join(
+                sorted([str(x) for x in self.introns])))
+        else:
+            self.set_meta('IN',None)
+
+        if len(self.genes) > 0:
+            self.set_meta('GN', ','.join(sorted([str(x) for x in self.genes])))
+        else:
+            self.set_meta('GN',None)
+
+        if len(self.junctions) > 0:
+            self.set_meta('JN', ','.join(
+                sorted([str(x) for x in self.junctions])))
+            # Is transcriptome
+            self.set_meta('IT', 1)
+        elif len(self.genes) > 0:
+            # Maps to gene but not junction
+            self.set_meta('IT', 0.5)
+            self.set_meta('JN',None)
+        else:
+            # Doesn't map to gene
+            self.set_meta('IT', 0)
+            self.set_meta('JN', None)
+
+        if self.is_spliced is True:
+            self.set_meta('SP', True)
+        elif self.is_spliced is False:
+            self.set_meta('SP', False)
+        if len(self.exon_hit_gene_names):
+            self.set_meta('gn', ';'.join(list(self.exon_hit_gene_names)))
+        else:
+            self.set_meta('gn',None)
+
+    def set_intron_exon_features(self):
+        if not self.is_annotated:
+            self.annotate()
+
+        # Collect all hits:
+        hits = self.hits.keys()
+
+        # (gene, transcript) -> set( exon_id  .. )
+        exon_hits = collections.defaultdict(set)
+        intron_hits = collections.defaultdict(set)
+
+        for hit, locations in self.hits.items():
+            if not isinstance(hit, tuple):
+                continue
+
+            meta = dict(list(hit))
+            if 'gene_id' not in meta:
+                continue
+            if meta.get('type') == 'exon':
+                if 'transcript_id' not in meta:
+                    continue
+                self.genes.add(meta['gene_id'])
+                self.exons.add(meta['exon_id'])
+                if 'transcript_id' not in meta:
+                    raise ValueError(
+                        "Please use an Intron GTF file generated using -id 'transcript_id'")
+                exon_hits[(meta['gene_id'], meta['transcript_id'])].add(
+                    meta['exon_id'])
+                if 'gene_name' in meta:
+                    self.exon_hit_gene_names.add(meta['gene_name'])
+            elif meta.get('type') == 'intron':
+                self.genes.add(meta['gene_id'])
+                self.introns.add(meta['gene_id'])
+
+        # Find junctions and add all annotations to annotation sets
+        debug = []
+
+        for (gene, transcript), exons_overlapping in exon_hits.items():
+            # If two exons are detected from the same gene we detected a
+            # junction:
+            if len(exons_overlapping) > 1:
+                self.junctions.add(gene)
+
+                # We found two exons and an intron:
+                if gene in self.introns:
+                    self.set_spliced(False)
+                else:
+                    self.set_spliced(True)
+
+            debug.append(
+                f'{gene}_{transcript}:' +
+                ','.join(
+                    list(exons_overlapping)))
+
+        # Write exon dictionary:
+        self.set_meta('DB', ';'.join(debug))
 
 
 if __name__ == "__main__":

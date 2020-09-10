@@ -6,6 +6,7 @@ import argparse
 import sys
 from singlecellmultiomics.bamProcessing import get_sample_to_read_group_dict
 import collections
+from singlecellmultiomics.utils.path import get_valid_filename
 
 def extract_samples( input_bam_path, output_path, capture_samples, head=None ):
     """
@@ -32,14 +33,18 @@ def extract_samples( input_bam_path, output_path, capture_samples, head=None ):
         output_handles[group] = pysam.AlignmentFile(output_path.replace('.bam',f'{group}.bam'), "wb", header=header)
         print(f'\t{group}\t{output_handles[group].filename.decode()}')
 
+    sample2handle = {}
+    for group,samples in capture_samples.items():
+        for sample in samples:
+            sample2handle[sample] = output_handles[group]
+
     written = 0
     for r in bamFile:
-        if r.has_tag('SM'):
-            sample = r.get_tag('SM')
-            for group in capture_samples:
-                if sample in capture_samples[group]:
-                    # Write
-                    output_handles[group].write(r)
+
+        try:
+            sample2handle[r.get_tag('SM')].write(r)
+        except Exception:
+            continue
 
             written += 1
             if head is not None and written >= head:
@@ -83,14 +88,18 @@ if __name__ == '__main__':
     capture_samples = collections.defaultdict( set ) # group -> set( samples )
     with open(args.extract) as e:
         for line in e:
-            parts = line.strip().split()
+            parts = line.strip().split(None, 1)
+            if len(parts)==0:
+                continue
 
             if len(parts)==1:
                 group = ''
                 sample = parts[0]
             elif len(parts)==2:
                 sample, group = parts
+                group = get_valid_filename(group)
             else:
+                print(f'Line with issue: {line} :: {parts}')
                 raise ValueError("Please supply a file with one or two columns: [SAMPLE], or [SAMPLE]{tab}[GROUP]")
             capture_samples[group].add( parts[0] )
 

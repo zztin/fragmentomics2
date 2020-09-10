@@ -2,32 +2,37 @@
 # -*- coding: utf-8 -*-
 
 import pysam
-from singlecellmultiomics.molecule import MoleculeIterator
+from singlecellmultiomics.molecule import MoleculeIterator, ReadIterator
 import singlecellmultiomics
 import singlecellmultiomics.molecule
+from singlecellmultiomics.molecule.consensus import calculate_consensus
 import singlecellmultiomics.fragment
-from singlecellmultiomics.bamProcessing.bamFunctions import sorted_bam_file, get_reference_from_pysam_alignmentFile, write_program_tag, MapabilityReader, verify_and_fix_bam
-
+from singlecellmultiomics.bamProcessing.bamFunctions import sorted_bam_file, get_reference_from_pysam_alignmentFile, write_program_tag, MapabilityReader, verify_and_fix_bam,add_blacklisted_region
 from singlecellmultiomics.utils import is_main_chromosome
 from singlecellmultiomics.utils.submission import submit_job
 import singlecellmultiomics.alleleTools
 from singlecellmultiomics.universalBamTagger.customreads import CustomAssingmentQueryNameFlagger
 from singlecellmultiomics.universalBamTagger.rca_th import RCA_Tidehunter_Flagger
 import singlecellmultiomics.features
-from pysamiterators import CachedFasta,MatePairIteratorIncludingNonProper,MatePairIterator
-
+from pysamiterators import MatePairIteratorIncludingNonProper, MatePairIterator
+from singlecellmultiomics.universalBamTagger.tagging import generate_tasks, prefetch, run_tagging_tasks
+from singlecellmultiomics.bamProcessing.bamBinCounts import blacklisted_binning_contigs,get_bins_from_bed_iter
+from singlecellmultiomics.utils.binning import bp_chunked
+from singlecellmultiomics.bamProcessing import merge_bams, get_contigs_with_reads
+from singlecellmultiomics.fastaProcessing import CachedFastaNoHandle
+from singlecellmultiomics.utils.prefetch import UnitialisedClass
+from multiprocessing import Pool
+from typing import Generator
 import argparse
 import uuid
 import os
 import sys
 import colorama
-import sklearn
 import pkg_resources
 import pickle
 from datetime import datetime
-import traceback
+from time import sleep
 
-available_consensus_models = pkg_resources.resource_listdir('singlecellmultiomics','molecule/consensus_model')
 
 argparser = argparse.ArgumentParser(
     formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -55,6 +60,8 @@ argparser.add_argument(
     fl_feature_counts (deduplicate using a bam file tagged using cd featurecounts, deduplicates based on fragment position)
     nla_taps (Data with digested by Nla III enzyme and methylation converted by TAPS)
     chic_taps (Data with digested by mnase enzyme and methylation converted by TAPS)
+    nla_tapsp_transcriptome (Add feature annotation to nla_ptaps mode )
+    nla_taps_transcriptome  (Add feature annotation to nla_taps mode )
     nla_no_overhang (Data with digested by Nla III enzyme, without the CATG present in the reads)
     scartrace (Lineage tracing )
     """)
@@ -76,6 +83,7 @@ r_select.add_argument('-contig', type=str, help='Contig to only process')
 r_select.add_argument('-skip_contig', type=str, help='Contigs not to process')
 r_select.add_argument('-region_start', type=int, help='Zero based start coordinate of region to process')
 r_select.add_argument('-region_end', type=int, help='Zero based end coordinate of region to process')
+r_select.add_argument('-blacklist', type=str, help='BED file containing regions to skip')
 
 allele_gr = argparser.add_argument_group('alleles')
 allele_gr.add_argument('-alleles', type=str, help="Phased allele file (VCF)")
@@ -96,11 +104,34 @@ allele_gr.add_argument(
 allele_gr.add_argument(
     '--use_allele_cache',
     action='store_true',
-    help='Write and use a cache file for the allele information. NOTE: THIS IS NOT THREAD SAFE! Meaning you should not use this function on multiple libraries at the same time when the cache files are not available. Once they are available there is not thread safety issue anymore')
+    help='''Write and use a cache file for the allele information. NOTE: THIS IS NOT THREAD SAFE! Meaning you should not use this function on multiple libraries at the same time when the cache files are not yet available.
+        Once they are available there is not thread safety issue anymore''')
 
 argparser.add_argument('-molecule_iterator_verbosity_interval',type=int,default=None,help='Molecule iterator information interval in seconds')
 argparser.add_argument('--molecule_iterator_verbose', action='store_true', help='Show progress indication on command line')
 argparser.add_argument('-stats_file_path',type=str,default=None,help='Path to logging file, ends with ".tsv"')
+
+argparser.add_argument(
+    '--multiprocess',
+    action='store_true',
+    help="Use multiple the CPUs of you system to achieve (much) faster tagging")
+argparser.add_argument(
+    '-tagthreads',
+    type=int,
+    help='Amount of processes to use for tagging (--multiprocess needs to be enabled). Uses all available CPUs when not set.'
+    )
+
+argparser.add_argument(
+    '-max_time_per_segment',
+    default=None,
+    type=float,
+    help='Maximum time spent on a single genomic location')
+
+argparser.add_argument(
+    '-temp_folder',
+    default='./',
+    help="Temp folder location")
+
 
 fragment_settings = argparser.add_argument_group('Fragment settings')
 fragment_settings.add_argument('-read_group_format', type=int, default=0, help="0: Every cell/sequencing unit gets a read group, 1: Every library/sequencing unit gets a read group")
@@ -115,16 +146,27 @@ fragment_settings.add_argument(
     help='NlaIII: Allow fragments to be shifted slightly around the cut site.')
 
 fragment_settings.add_argument(
+    '-assignment_radius',
+    type=int,
+    help='Molecule assignment radius')
+
+fragment_settings.add_argument(
+    '-libname',type=str,
+    help='Overwrite library name with this value')
+
+
+fragment_settings.add_argument(
     '--no_rejects',
     action='store_true',
     help='Do not write rejected reads to output file')
+
 fragment_settings.add_argument(
     '--no_overflow',
     action='store_true',
     help='Do not write overflow reads to output file. Overflow reads are reads which are discarded because the molecule reached the maximum capacity of associated fragments')
 
 
-molecule_settings = argparser.add_argument_group('Fragment settings')
+molecule_settings = argparser.add_argument_group('Molecule settings')
 molecule_settings.add_argument(
     '-mapfile',
     type=str,
@@ -136,7 +178,10 @@ molecule_settings.add_argument(
     default=1,
     help="Annotation resolving method. 0: molecule consensus aligned blocks. 1: per read per aligned base")
 
-
+molecule_settings.add_argument(
+    '--feature_container_verbose',
+        action='store_true',
+        help='Make the feature container print more')
 
 cluster = argparser.add_argument_group('cluster execution')
 cluster.add_argument(
@@ -182,31 +227,10 @@ cg.add_argument(
     '--consensus',
     action='store_true',
     help='Calculate molecule consensus read, this feature is _VERY_ experimental')
-cg.add_argument('-consensus_mask_variants', type=str,
-                help='variants to mask during training (VCF file)')
-cg.add_argument(
-    '-consensus_model',
-    type=str,
-    help=f'Name of or path to consensus classifier, built-in available models are:{", ".join(available_consensus_models)}',
-    default=None)
-cg.add_argument(
-    '-consensus_n_train',
-    type=int,
-    help='Amount of bases used for training',
-    default=500_000)
-
-cg.add_argument(
-    '-consensus_k_rad',
-    type=int,
-    help='consensus model k radius',
-    default=3)
-
 
 cg.add_argument('--no_source_reads', action='store_true',
                 help='Do not write original reads, only consensus ')
 
-cg.add_argument('--consensus_allow_train_location_oversampling', action='store_true',
-                help='Allow to train the consensus model multiple times for a single genomic location')
 
 
 ma = argparser.add_argument_group('Molecule assignment settings')
@@ -221,6 +245,251 @@ ma.add_argument(
     action='store_true',
     help='Do not use the alignment during deduplication')
 ma.add_argument('-max_associated_fragments',type=int, default=None, help="Limit the maximum amount of reads associated to a single molecule.")
+
+
+def tag_multiome_multi_processing(
+        input_bam_path: str,
+        out_bam_path: str,
+        molecule_iterator: Generator = None, # @todo add custom molecule iterator?
+        molecule_iterator_args: dict = None,
+        ignore_bam_issues: bool = False,  # @todo add ignore_bam_issues
+        head: int = None,  # @todo add head
+        no_source_reads: bool = False,  # @todo add no_source_reads
+        # One extra parameter is the fragment size:
+        fragment_size: int = None,
+        # And the blacklist is optional:
+        blacklist_path: str = None,
+        bp_per_job: int = None,
+        bp_per_segment: int = None,
+        temp_folder_root: str = '/tmp/scmo',
+        max_time_per_segment: int = None,
+        use_pool: bool = True,
+        one_contig_per_process: bool =False,
+        additional_args: dict = None,
+        n_threads=None
+    ):
+
+    assert bp_per_job is not None
+    assert fragment_size is not None
+    assert bp_per_segment is not None
+
+    if not os.path.exists(temp_folder_root):
+        raise ValueError(f'The path {temp_folder_root} does not exist')
+    temp_folder = os.path.join( temp_folder_root , f'scmo_{uuid.uuid4()}' )
+    if not os.path.exists(temp_folder):
+        os.makedirs(temp_folder, exist_ok=True)
+
+    if molecule_iterator_args.get('skip_contigs', None) is not None:
+        contig_blacklist = molecule_iterator_args.get('skip_contigs')
+    else:
+        contig_blacklist = []
+
+    if molecule_iterator_args.get('contig',None) is not None:
+        assert molecule_iterator_args.get('start') is None, 'regions are not implemented'
+        contig_whitelist = [molecule_iterator_args['contig']]
+    else:
+        contig_whitelist = [contig for contig in get_contigs_with_reads(input_bam_path) if not contig in contig_blacklist]
+
+    for prune in ['start', 'end', 'contig', 'progress_callback_function','alignments']:
+        if prune in molecule_iterator_args:
+            del molecule_iterator_args[prune]
+
+    iteration_args = {
+        'molecule_iterator_args': molecule_iterator_args,
+        'molecule_iterator_class': MoleculeIterator
+    }
+
+    # Define the regions to be processed and group into segments to perform tagging on
+    if one_contig_per_process:
+
+        #job_gen = [ [(contig,0,contig_len,0,contig_len),] for contig,contig_len in get_contigs_with_reads(input_bam_path, True)  ]
+        if blacklist_path is not None:
+            raise NotImplementedError('A blacklist is currently incompatible with --multiprocessing in single contig mode')
+        job_gen = [ [(contig,None,None,None,None),] for contig,contig_len in get_contigs_with_reads(input_bam_path, True)  ]
+
+    else:
+        regions = blacklisted_binning_contigs(
+                contig_length_resource=input_bam_path,
+                bin_size=bp_per_segment,
+                fragment_size=fragment_size,
+                blacklist_path=blacklist_path,
+                contig_whitelist=contig_whitelist
+            )
+
+        # Chunk into jobs of roughly equal size: (A single job will process multiple segments)
+        job_gen = bp_chunked(regions, bp_per_job)
+
+    tasks = generate_tasks(input_bam_path=input_bam_path,
+                           job_gen=job_gen,
+                           iteration_args=iteration_args,
+                           temp_folder=temp_folder,
+                           additional_args= additional_args,
+                           max_time_per_segment=max_time_per_segment)
+
+    # Create header bam:
+    temp_header_bam_path = f'{temp_folder}/{uuid.uuid4()}_header.bam'
+    with pysam.AlignmentFile(input_bam_path) as input_bam:
+        input_header = input_bam.header.as_dict()
+
+        # Write provenance information to BAM header
+        write_program_tag(
+            input_header,
+            program_name='bamtagmultiome',
+            command_line=" ".join(
+                sys.argv),
+            version=singlecellmultiomics.__version__,
+            description=f'SingleCellMultiOmics molecule processing, executed at {datetime.now().strftime("%d/%m/%Y %H:%M:%S")}')
+
+
+        if blacklist_path is not None:
+            for contig, start, end in get_bins_from_bed_iter(blacklist_path):
+                add_blacklisted_region(input_header,contig,start,end,source=blacklist_path)
+
+        # Prefetch the genomic resources with the defined genomic interval reducing I/O load during processing of the region
+        # this is now done automatically, by tagging.run_tagging_task
+
+        # @todo : Obtain auto blacklisted regions if applicable
+        # @todo : Progress indication
+
+        bam_files_generated = []
+
+        if use_pool:
+            workers = Pool(n_threads)
+            job_generator = workers.imap_unordered(run_tagging_tasks, tasks)
+
+        else:
+            job_generator = (run_tagging_tasks(task) for task in tasks)
+
+        total_processed_molecules = 0
+        for bam, meta in job_generator:
+            if bam is not None:
+                bam_files_generated.append(bam)
+            if len(meta):
+                total_processed_molecules+=meta['total_molecules']
+                timeouts = meta.get('timeout_tasks',[])
+                for timeout in timeouts:
+                    print('blacklisted', timeout['contig'], timeout['start'], timeout['end'])
+                    add_blacklisted_region(input_header,
+                        contig=timeout['contig'],
+                        start=timeout['start'],
+                        end=timeout['end']
+                    )
+            if head is not None and total_processed_molecules>head:
+                print('Head was supplied, stopping')
+                break
+        tagged_bam_generator = [temp_header_bam_path] +  bam_files_generated
+
+        with pysam.AlignmentFile(temp_header_bam_path, 'wb', header=input_header) as out:
+            pass
+
+        pysam.index(temp_header_bam_path)
+    # merge the results and clean up:
+    print('Merging final bam files')
+    merge_bams(list(tagged_bam_generator), out_bam_path)
+    if use_pool:
+        workers.close()
+
+    # Remove the temp dir:
+    sleep(5)
+    try:
+        os.rmdir(temp_folder)
+    except Exception:
+        sys.stderr.write(f'Failed to remove {temp_folder}\n')
+
+    write_status(out_bam_path, 'Reached end. All ok!')
+
+
+def tag_multiome_single_thread(
+        input_bam_path,
+        out_bam_path,
+        molecule_iterator = None,
+        molecule_iterator_args = None,
+        consensus_model = None,
+        consensus_model_args={}, # Clearly the consensus model class and arguments should be part of molecule
+        ignore_bam_issues=False,
+        head=None,
+        no_source_reads=False
+        ):
+
+    input_bam = pysam.AlignmentFile(input_bam_path, "rb", ignore_truncation=ignore_bam_issues, threads=4)
+    input_header = input_bam.header.as_dict()
+
+
+    # Write provenance information to BAM header
+    write_program_tag(
+        input_header,
+        program_name='bamtagmultiome',
+        command_line=" ".join(
+            sys.argv),
+        version=singlecellmultiomics.__version__,
+        description=f'SingleCellMultiOmics molecule processing, executed at {datetime.now().strftime("%d/%m/%Y %H:%M:%S")}')
+
+    print(f'Started writing to {out_bam_path}')
+
+    # de-prefetch all:
+
+
+    # contig, start, end, start, end , args
+
+    molecule_iterator_args = prefetch(molecule_iterator_args['contig'],
+                                    molecule_iterator_args['start'],
+                                    molecule_iterator_args['end'],
+                                    molecule_iterator_args['start'],
+                                    molecule_iterator_args['end'],
+                                    molecule_iterator_args)
+
+
+    molecule_iterator_exec = molecule_iterator(input_bam, **{k:v for k, v in molecule_iterator_args.items()
+                                                            if k != 'alignments'})
+
+    print('Params:',molecule_iterator_args)
+    read_groups = dict()  # Store unique read groups in this dict
+
+
+
+    with sorted_bam_file(out_bam_path, header=input_header, read_groups=read_groups) as out:
+        try:
+            for i, molecule in enumerate(molecule_iterator_exec):
+
+                # Stop when enough molecules are processed
+                if head is not None and (i - 1) >= head:
+                    break
+
+                # set unique molecule identifier
+                molecule.set_meta('mi', f'{molecule.get_a_reference_id()}_{i}')
+
+                # Write tag values
+                molecule.write_tags()
+
+                """
+                if unphased_allele_resolver is not None:  # write unphased allele tag:
+                    molecule.write_allele_phasing_information_tag(
+                        unphased_allele_resolver, 'ua')
+                """
+
+                # Update read groups
+                for fragment in molecule:
+                    rgid = fragment.get_read_group()
+                    if not rgid in read_groups:
+                        read_groups[rgid] = fragment.get_read_group(True)[1]
+
+                # Calculate molecule consensus
+                if consensus_model is not None:
+                    calculate_consensus(molecule,
+                                        consensus_model,
+                                        i,
+                                        out,
+                                        **consensus_model_args)
+
+                # Write the reads to the output file
+                if not no_source_reads:
+                    molecule.write_pysam(out)
+        except Exception as e:
+            write_status(out_bam_path,'FAIL, The file is not complete')
+            raise e
+
+        # Reached the end of the generator
+        write_status(out_bam_path,'Reached end. All ok!')
 
 def write_status(output_path, message):
     status_path = output_path.replace('.bam','.status.txt')
@@ -257,7 +526,7 @@ def run_multiome_tagging(args):
             cs_feature_counts (Single end, deduplicate using a bam file tagged using featurecounts, deduplicates a umi per gene)
             fl_feature_counts (deduplicate using a bam file tagged using featurecounts, deduplicates based on fragment position)
             nla_taps (Data with digested by Nla III enzyme and methylation converted by TAPS)
-            chic_taps (Data with digested by mnase enzyme and methylation converted by TAPS)
+            chic_taps (Data with digested by mnase enzyme and methylation converted by TAPS), chic_taps_transcriptome (Same as chic_taps, but includes annotations)
             chic_nla
             scartrace  (lineage tracing protocol)
 
@@ -344,19 +613,25 @@ def run_multiome_tagging(args):
 
     if args.ref is not None:
         try:
-            reference = CachedFasta(
-                pysam.FastaFile(args.ref))
+            reference = UnitialisedClass(CachedFastaNoHandle, args.ref)
             print(f'Loaded reference from {args.ref}')
         except Exception as e:
             print("Error when loading the reference file, continuing without a reference")
             reference = None
 
+    ##### Set up consensus
+    consensus_model_args = {'consensus_mode':None}
+    if args.consensus:
+        consensus_model_args = {'consensus_mode': 'majority'}
+    if args.no_source_reads:
+        consensus_model_args['no_source_reads'] = True
+
     ##### Define fragment and molecule class arguments and instances: ####
 
-    queryNameFlagger = None
+    query_name_flagger = None
     if args.qflagger is not None:
         if args.qflagger == 'custom_flags':
-            queryNameFlagger = CustomAssingmentQueryNameFlagger(
+            query_name_flagger = CustomAssingmentQueryNameFlagger(
                 args.custom_flags.split(','))
         elif args.qflagger == 'cyclomics_th':
             queryNameFlagger = RCA_Tidehunter_Flagger(SMTag=args.sample_name)
@@ -389,7 +664,7 @@ def run_multiome_tagging(args):
     if args.method == 'nla_taps' or args.method == 'chic_taps':
         ignore_conversions = set([('C', 'T'), ('G', 'A')])
 
-    if args.alleles is not None:
+    if args.alleles is not None and args.alleles!='none':
         molecule_class_args['allele_resolver'] = singlecellmultiomics.alleleTools.AlleleResolver(
             args.alleles,
             select_samples=args.allele_samples.split(',') if args.allele_samples is not None else None,
@@ -399,11 +674,11 @@ def run_multiome_tagging(args):
             ignore_conversions=ignore_conversions)
 
     if args.mapfile is not None:
-        molecule_class_args['mapability_reader'] = MapabilityReader(
-            args.mapfile)
+        assert args.mapfile.endswith('safe.bgzf'), 'the mapfile name should end with safe.bgzf '
+        molecule_class_args['mapability_reader'] = MapabilityReader(args.mapfile)
 
     ### Transcriptome configuration ###
-    if args.method in ('nla_transcriptome', 'cs', 'vasa'):
+    if args.method in ('cs', 'vasa',  'chict') or args.method.endswith('_transcriptome'):
         print(
             colorama.Style.BRIGHT +
             'Running in transcriptome annotation mode' +
@@ -414,10 +689,10 @@ def run_multiome_tagging(args):
         if args.introns is not None and args.exons is None:
             raise ValueError("Please supply both intron and exon GTF files")
 
-        transcriptome_features = singlecellmultiomics.features.FeatureContainer()
+        transcriptome_features = singlecellmultiomics.features.FeatureContainer(verbose=args.feature_container_verbose)
         print("Loading exons", end='\r')
-        transcriptome_features.loadGTF(
-            args.exons,
+        transcriptome_features.preload_GTF(
+            path=args.exons,
             select_feature_type=['exon'],
             identifierFields=(
                 'exon_id',
@@ -428,8 +703,8 @@ def run_multiome_tagging(args):
 
         if args.introns is not None:
             print("Loading introns", end='\r')
-            transcriptome_features.loadGTF(
-                args.introns,
+            transcriptome_features.preload_GTF(
+                path=args.introns,
                 select_feature_type=['intron'],
                 identifierFields=['transcript_id'],
                 store_all=True,
@@ -438,29 +713,48 @@ def run_multiome_tagging(args):
         print("All features loaded")
 
         # Add more molecule class arguments
-        molecule_class_args.update({
+        transcriptome_feature_args = {
             'features': transcriptome_features,
-            'auto_set_intron_exon_features': True
-        })
+            'auto_set_intron_exon_features': True,
+        }
+
+
+    bp_per_job = 10_000_000
+    pooling_method=1
+    bp_per_segment = 999_999_999 #@todo make this None or so
+    fragment_size = 500
+    one_contig_per_process=False
+    max_time_per_segment = args.max_time_per_segment
 
     ### Method specific configuration ###
     if args.method == 'qflag':
-        moleculeClass = singlecellmultiomics.molecule.Molecule
-        fragmentClass = singlecellmultiomics.fragment.Fragment
+
+        molecule_class = singlecellmultiomics.molecule.Molecule
+        fragment_class = singlecellmultiomics.fragment.FragmentStartPosition
+
         # Write all reads
         yield_invalid = True
 
     # elif args.method == 'cyclomics':
     #     moleculeClass = singlecellmultiomics.molecule.CycMolecule
     #     fragmentClass = singlecellmultiomics.fragment.CycFragment
+        bp_per_job = 3_000_000
+        bp_per_segment = 3_000_000
+        fragment_size = 0
 
     elif args.method == 'chic':
-        moleculeClass = singlecellmultiomics.molecule.CHICMolecule
-        fragmentClass = singlecellmultiomics.fragment.CHICFragment
+        molecule_class = singlecellmultiomics.molecule.CHICMolecule
+        fragment_class = singlecellmultiomics.fragment.CHICFragment
+
+        bp_per_job = 5_000_000
+        bp_per_segment = 50_000
+        fragment_size = 1000
+        if max_time_per_segment is None:
+            max_time_per_segment = 20 # 20 seconds should be plenty for 50kb
 
     elif args.method == 'nla' or args.method == 'nla_no_overhang':
-        moleculeClass = singlecellmultiomics.molecule.NlaIIIMolecule
-        fragmentClass = singlecellmultiomics.fragment.NLAIIIFragment
+        molecule_class = singlecellmultiomics.molecule.NlaIIIMolecule
+        fragment_class = singlecellmultiomics.fragment.NlaIIIFragment
 
         if args.method == 'nla_no_overhang':
             assert reference is not None, 'Supply a reference fasta using -ref!'
@@ -468,68 +762,134 @@ def run_multiome_tagging(args):
                     'reference': reference,
                     'no_overhang': True
                 })
+        bp_per_job = 10_000_000
+        bp_per_segment = 10_000_000
+        fragment_size = 500
 
     elif args.method == 'chic_nla':
-        moleculeClass=singlecellmultiomics.molecule.CHICNLAMolecule
-        fragmentClass=singlecellmultiomics.fragment.CHICFragment
+        molecule_class=singlecellmultiomics.molecule.CHICNLAMolecule
+        fragment_class=singlecellmultiomics.fragment.CHICFragment
         assert reference is not None, 'Supply a reference fasta using -ref!'
         molecule_class_args.update({
                 'reference': reference,
         })
 
+        bp_per_job = 5_000_000
+        bp_per_segment = 50_000
+        fragment_size = 500
+
     elif args.method == 'cs_feature_counts' :
-        moleculeClass = singlecellmultiomics.molecule.Molecule
-        fragmentClass = singlecellmultiomics.fragment.FeatureCountsSingleEndFragment
+        molecule_class = singlecellmultiomics.molecule.Molecule
+        fragment_class = singlecellmultiomics.fragment.FeatureCountsSingleEndFragment
 
     elif args.method == 'fl_feature_counts':
 
-        moleculeClass = singlecellmultiomics.molecule.Molecule
-        fragmentClass = singlecellmultiomics.fragment.FeatureCountsFullLengthFragment
+        molecule_class = singlecellmultiomics.molecule.Molecule
+        fragment_class = singlecellmultiomics.fragment.FeatureCountsFullLengthFragment
 
-    elif args.method == 'episeq' :
-        moleculeClass = singlecellmultiomics.molecule.Molecule
-        fragmentClass = singlecellmultiomics.fragment.FeatureCountsSingleEndFragment
+    elif args.method == 'episeq':
+        molecule_class = singlecellmultiomics.molecule.Molecule
+        fragment_class = singlecellmultiomics.fragment.FeatureCountsSingleEndFragment
 
     elif args.method == 'nla_transcriptome':
-        moleculeClass = singlecellmultiomics.molecule.AnnotatedNLAIIIMolecule
-        fragmentClass = singlecellmultiomics.fragment.NLAIIIFragment
+        molecule_class = singlecellmultiomics.molecule.AnnotatedNLAIIIMolecule
+        fragment_class = singlecellmultiomics.fragment.NlaIIIFragment
 
         molecule_class_args.update({
-            'pooling_method': 1,  # all data from the same cell can be dealt with separately
             'stranded': None  # data is not stranded
         })
+    elif args.method == 'chict' :
+
+        molecule_class = singlecellmultiomics.molecule.AnnotatedCHICMolecule
+        fragment_class = singlecellmultiomics.fragment.CHICFragment
+        bp_per_job = 5_000_000
+        bp_per_segment = 500_000
+        fragment_size = 50_000
 
     elif args.method == 'nla_taps':
-        moleculeClass = singlecellmultiomics.molecule.TAPSNlaIIIMolecule
-        fragmentClass = singlecellmultiomics.fragment.NLAIIIFragment
+        molecule_class = singlecellmultiomics.molecule.TAPSNlaIIIMolecule
+        fragment_class = singlecellmultiomics.fragment.NlaIIIFragment
 
         molecule_class_args.update({
             'reference': reference,
-            'taps': singlecellmultiomics.molecule.TAPS(reference=reference)
+            'taps': singlecellmultiomics.molecule.TAPS()
         })
+        if args.consensus:
+            bp_per_job = 2_000_000
+        else:
+            bp_per_job = 5_000_000
+        bp_per_segment = 1_000_000
+        fragment_size = 500
+    elif args.method == 'nla_taps_transcriptome': # Annotates reads in transcriptome
+        molecule_class = singlecellmultiomics.molecule.AnnotatedTAPSNlaIIIMolecule
+        fragment_class = singlecellmultiomics.fragment.NlaIIIFragment
+
+        molecule_class_args.update(transcriptome_feature_args)
+
+        molecule_class_args.update({
+            'reference': reference,
+            'taps': singlecellmultiomics.molecule.TAPS()
+        })
+        bp_per_job = 5_000_000
+        bp_per_segment = 5_000_000
+        fragment_size = 100_000
+
+    elif args.method == 'nla_tapsp_transcriptome': # Annotates reads in transcriptome
+        molecule_class = singlecellmultiomics.molecule.TAPSPTaggedMolecule
+        fragment_class = singlecellmultiomics.fragment.NlaIIIFragment
+        molecule_class_args.update(transcriptome_feature_args)
+        molecule_class_args.update({
+            'reference': reference,
+            'taps': singlecellmultiomics.molecule.TAPS()
+        })
+        bp_per_job = 5_000_000
+        bp_per_segment = 5_000_000
+        fragment_size = 100_000
+
+    elif args.method == 'chic_taps_transcriptome':
+
+        bp_per_job = 5_000_000
+        bp_per_segment = 5_000_000
+        fragment_size = 100_000
+        molecule_class_args.update({
+            'reference': reference,
+            'taps': singlecellmultiomics.molecule.TAPS(),
+            'taps_strand':'R'
+        })
+        molecule_class_args.update(transcriptome_feature_args)
+        molecule_class = singlecellmultiomics.molecule.AnnotatedTAPSCHICMolecule
+        fragment_class = singlecellmultiomics.fragment.CHICFragment
 
     elif args.method == 'chic_taps':
-
+        bp_per_job = 5_000_000
+        bp_per_segment = 1_000_000
+        fragment_size = 500
         molecule_class_args.update({
             'reference': reference,
-            'taps': singlecellmultiomics.molecule.TAPS(reference=reference)
+            'taps': singlecellmultiomics.molecule.TAPS(),
+            'taps_strand':'R'
         })
-        moleculeClass = singlecellmultiomics.molecule.TAPSCHICMolecule
-        fragmentClass = singlecellmultiomics.fragment.CHICFragment
+        molecule_class = singlecellmultiomics.molecule.TAPSCHICMolecule
+        fragment_class = singlecellmultiomics.fragment.CHICFragment
 
     elif args.method == 'vasa' or args.method == 'cs':
-        moleculeClass = singlecellmultiomics.molecule.VASA
-        fragmentClass = singlecellmultiomics.fragment.SingleEndTranscript
+        one_contig_per_process=True
+        bp_per_job = 5_000_000
+        bp_per_segment = 1_000_000
+        fragment_size = 100_000
 
-        molecule_class_args.update({
-            'pooling_method': 1,  # all data from the same cell can be dealt with separately
-            'stranded': 1  # data is stranded
-        })
+        molecule_class = singlecellmultiomics.molecule.TranscriptMolecule
+        fragment_class = singlecellmultiomics.fragment.SingleEndTranscriptFragment
+        #molecule_class_args.update(transcriptome_feature_args)
+        fragment_class_args.update(transcriptome_feature_args)
+        fragment_class_args.update({'stranded': True })
+        molecule_class_args.update({'cache_size':1000})
+
 
     elif args.method == 'scartrace':
 
-        moleculeClass = singlecellmultiomics.molecule.ScarTraceMolecule
-        fragmentClass = singlecellmultiomics.fragment.ScarTraceFragment
+        molecule_class = singlecellmultiomics.molecule.ScarTraceMolecule
+        fragment_class = singlecellmultiomics.fragment.ScarTraceFragment
 
         r1_primers = args.scartrace_r1_primers.split(',')
         fragment_class_args.update({
@@ -542,7 +902,7 @@ def run_multiome_tagging(args):
         raise ValueError("Supply a valid method")
 
     # Allow or disallow cycle shift:
-    if args.allow_cycle_shift and fragmentClass is singlecellmultiomics.fragment.NLAIIIFragment:
+    if args.allow_cycle_shift and fragment_class is singlecellmultiomics.fragment.NlaIIIFragment:
         fragment_class_args['allow_cycle_shift'] = True
 
     # This disables umi_cigar_processing:
@@ -551,6 +911,16 @@ def run_multiome_tagging(args):
 
     if args.max_associated_fragments is not None:
         molecule_class_args['max_associated_fragments'] = args.max_associated_fragments
+
+
+    if args.assignment_radius is not None:
+        fragment_class_args['assignment_radius'] = args.assignment_radius
+        if args.multiprocess:
+            one_contig_per_process=True
+            #raise NotImplementedError('-assignment_radius is currently incompatible with --multiprocess')
+
+    if args.libname is not None:
+        fragment_class_args['library_name'] = args.libname
 
     # This decides what molecules we will traverse
     if args.contig == MISC_ALT_CONTIGS_SCMO:
@@ -604,12 +974,11 @@ def run_multiome_tagging(args):
         progress_callback_function = None
 
 
-
     molecule_iterator_args = {
-        'alignments': input_bam,
-        'queryNameFlagger': queryNameFlagger,
-        'moleculeClass': moleculeClass,
-        'fragmentClass': fragmentClass,
+        #'alignments': input_bam,
+        'query_name_flagger': query_name_flagger,
+        'molecule_class': molecule_class,
+        'fragment_class': fragment_class,
         'molecule_class_args': molecule_class_args,
         'fragment_class_args': fragment_class_args,
         'yield_invalid': yield_invalid,
@@ -619,8 +988,11 @@ def run_multiome_tagging(args):
         'contig': contig,
         'every_fragment_as_molecule': every_fragment_as_molecule,
         'skip_contigs':skip_contig,
-        'progress_callback_function':progress_callback_function
+        'progress_callback_function':progress_callback_function,
+        'pooling_method' : pooling_method
     }
+
+
 
     if args.resolve_unproperly_paired_reads:
         molecule_iterator_args['iterator_class'] = MatePairIteratorIncludingNonProper
@@ -630,60 +1002,24 @@ def run_multiome_tagging(args):
         # mapping to a contig returning True from the is_main_chromosome
         # function are used
 
-        def Misc_contig_molecule_generator(molecule_iterator_args):
+        def Misc_contig_molecule_generator(input_bam, **molecule_iterator_args):
             for reference in input_bam.references:
                 if not is_main_chromosome(reference):
                     molecule_iterator_args['contig'] = reference
-                    yield from MoleculeIterator(**molecule_iterator_args)
+                    yield from MoleculeIterator(input_bam, **molecule_iterator_args)
 
-        molecule_iterator = Misc_contig_molecule_generator(
-            molecule_iterator_args)
+        molecule_iterator = Misc_contig_molecule_generator
     else:
-        molecule_iterator = MoleculeIterator(**molecule_iterator_args)
+        molecule_iterator = MoleculeIterator
+
+    if args.method == 'qflag':
+        molecule_iterator_args['every_fragment_as_molecule'] = True
+        molecule_iterator_args['iterator_class'] = ReadIterator
+
 
     #####
     consensus_model_path = None
 
-    if args.consensus:
-        # Load from path if available:
-
-        if args.consensus_model is not None:
-            if os.path.exists(args.consensus_model):
-                model_path = args.consensus_model
-            else:
-                model_path = pkg_resources.resource_filename(
-                    'singlecellmultiomics', f'molecule/consensus_model/{args.consensus_model}')
-
-            if model_path.endswith('.h5'):
-                try:
-                    from tensorflow.keras.models import load_model
-                except ImportError:
-                    print("Please install tensorflow")
-                    raise
-                consensus_model = load_model(model_path)
-
-            else:
-                with open(model_path, 'rb') as f:
-                    consensus_model = pickle.load(f)
-        else:
-            skip_already_covered_bases = not args.consensus_allow_train_location_oversampling
-            if args.consensus_mask_variants is None:
-                mask_variants = None
-            else:
-                mask_variants = pysam.VariantFile(args.consensus_mask_variants)
-            print("Fitting consensus model, this may take a long time")
-            consensus_model = singlecellmultiomics.molecule.train_consensus_model(
-                molecule_iterator,
-                mask_variants=mask_variants,
-                n_train=args.consensus_n_train,
-                skip_already_covered_bases=skip_already_covered_bases
-                )
-            # Write the consensus model to disk
-            consensus_model_path = os.path.abspath(
-                os.path.dirname(args.o)) + '/consensus_model.pickle.gz'
-            print(f'Writing consensus model to {consensus_model_path}')
-            with open(consensus_model_path, 'wb') as f:
-                pickle.dump(consensus_model, f)
 
     # We needed to check if every argument is properly placed. If so; the jobs
     # can be sent to the cluster
@@ -763,6 +1099,7 @@ def run_multiome_tagging(args):
 
     #####
     # Load unphased variants to memory
+    """
     unphased_allele_resolver = None
     if args.unphased_alleles is not None:
         unphased_allele_resolver = singlecellmultiomics.alleleTools.AlleleResolver(
@@ -788,78 +1125,39 @@ def run_multiome_tagging(args):
                     variant.alleles[0]: {'U'}, variant.alleles[1]: {'V'}}
         except Exception as e:  # todo catch this more nicely
             print(e)
-    out_bam_path = args.o
-
-    # Copy the header
-    input_header = input_bam.header.as_dict()
-
-    # Write provenance information to BAM header
-    write_program_tag(
-        input_header,
-        program_name='bamtagmultiome',
-        command_line=" ".join(
-            sys.argv),
-        version=singlecellmultiomics.__version__,
-        description=f'SingleCellMultiOmics molecule processing, executed at {datetime.now().strftime("%d/%m/%Y %H:%M:%S")}')
-
-    print(f'Started writing to {out_bam_path}')
-
-    read_groups = dict()  # Store unique read groups in this dict
-    with sorted_bam_file(out_bam_path, header=input_header, read_groups=read_groups) as out:
-
-        try:
-            for i, molecule in enumerate(molecule_iterator):
-
-                # Stop when enough molecules are processed
-                if args.head is not None and (i - 1) >= args.head:
-                    break
-
-                # set unique molecule identifier
-                molecule.set_meta('mi', f'{molecule.get_a_reference_id()}_{i}')
-
-                # Write tag values
-                molecule.write_tags()
-
-                if unphased_allele_resolver is not None:  # write unphased allele tag:
-                    molecule.write_allele_phasing_information_tag(
-                        unphased_allele_resolver, 'ua')
-
-                # Update read groups
-                for fragment in molecule:
-                    rgid = fragment.get_read_group()
-                    if not rgid in read_groups:
-                        read_groups[rgid] = fragment.get_read_group(True)[1]
-
-                # Calculate molecule consensus
-                if args.consensus:
-                    try:
-                        consensus_reads = molecule.deduplicate_to_single_CIGAR_spaced(
-                            out,
-                            f'consensus_{molecule.get_a_reference_id()}_{i}',
-                            consensus_model,
-                            NUC_RADIUS=args.consensus_k_rad
-                            )
-                        for consensus_read in consensus_reads:
-                            consensus_read.set_tag('RG', molecule[0].get_read_group())
-                            consensus_read.set_tag('mi', i)
-                            out.write(consensus_read)
-                    except Exception as e:
-
-                        #traceback.print_exc()
-                        #print(e)
-                        molecule.set_rejection_reason('CONSENSUS_FAILED',set_qcfail=True)
-                        molecule.write_pysam(out)
+    """
 
 
-                # Write the reads to the output file
-                if not args.no_source_reads:
-                    molecule.write_pysam(out)
-        except Exception as e:
-            write_status(args.o,'FAIL, The file is not complete')
-            raise e
 
-        # Reached the end of the generator
-        write_status(args.o,'Reached end. All ok!')
+    if args.multiprocess:
+
+        print("Tagging using multi-processing")
+        tag_multiome_multi_processing(input_bam_path=args.bamin, out_bam_path=args.o, molecule_iterator=molecule_iterator,
+                                      molecule_iterator_args=molecule_iterator_args,ignore_bam_issues=args.ignore_bam_issues,
+                                      head=args.head, no_source_reads=args.no_source_reads,
+                                      fragment_size=fragment_size, blacklist_path=args.blacklist,bp_per_job=bp_per_job,
+                                      bp_per_segment=bp_per_segment, temp_folder_root=args.temp_folder, max_time_per_segment=max_time_per_segment,
+                                      additional_args=consensus_model_args, n_threads=args.tagthreads, one_contig_per_process=one_contig_per_process
+                                      )
+    else:
+
+        if consensus_model_args.get('consensus_mode') is not None:
+            raise NotImplementedError('Please use --multiprocess')
+
+        # Alignments are passed as pysam handle:
+        if args.blacklist is not None:
+            raise NotImplementedError("Blacklist can only be used with --multiprocess")
+        tag_multiome_single_thread(
+            args.bamin,
+            args.o,
+            molecule_iterator = molecule_iterator,
+            molecule_iterator_args = molecule_iterator_args,
+            consensus_model = None ,
+            consensus_model_args={},
+            ignore_bam_issues=False,
+            head=args.head,
+            no_source_reads=args.no_source_reads
+            )
 
 
 if __name__ == '__main__':

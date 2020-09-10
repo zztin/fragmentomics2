@@ -4,6 +4,7 @@ import pysamiterators.iterators
 import singlecellmultiomics.modularDemultiplexer.baseDemultiplexMethods
 from singlecellmultiomics.utils import style_str
 from singlecellmultiomics.bamProcessing import get_read_group_from_read
+from singlecellmultiomics.features import FeatureAnnotatedObject
 complement = str.maketrans('ATCGN', 'TAGCN')
 
 
@@ -49,7 +50,9 @@ class Fragment():
                  tag_definitions=None,
                  max_fragment_size = None,
                  mapping_dir=(False, True),
-                 read_group_format=0  # R1 forward, R2 reverse
+                 max_NUC_stretch = None,
+                 read_group_format=0,  # R1 forward, R2 reverse
+                 library_name=None # Overwrites the library name
                  ):
         """
         Initialise Fragment
@@ -105,6 +108,8 @@ class Fragment():
         self.random_primer_sequence = None
         self.max_fragment_size = max_fragment_size
         self.read_group_format = read_group_format
+        self.max_NUC_stretch = max_NUC_stretch
+        self.qcfail = False
 
         # Span:\
         self.span = [None, None, None]
@@ -112,10 +117,21 @@ class Fragment():
         self.umi = None
 
         # Force R1=read1 R2=read2:
+
         for i, read in enumerate(self.reads):
 
             if read is None:
                 continue
+
+            if self.max_NUC_stretch is not None and (
+                self.max_NUC_stretch*'A' in read.seq or \
+                self.max_NUC_stretch*'G' in read.seq or \
+                self.max_NUC_stretch*'T' in read.seq or \
+                self.max_NUC_stretch*'C' in read.seq ):
+                self.set_rejection_reason('HomoPolymer', set_qcfail=True)
+                self.qcfail=True
+                break
+
             if read.has_tag('rS'):
                 self.random_primer_sequence = read.get_tag('rS')
                 self.unsafe_trimmed = True
@@ -135,7 +151,10 @@ class Fragment():
                 read.is_read1 = False
                 read.is_read2 = True
 
-        self.set_sample()
+
+        self.set_sample(library_name=library_name)
+        if self.qcfail:
+            return
         self.set_strand(self.identify_strand())
         self.update_span()
         self.update_umi()
@@ -502,7 +521,7 @@ class Fragment():
 
         return True
 
-    def set_sample(self, sample=None):
+    def set_sample(self, sample=None, library_name=None):
         """Force sample name or obtain sample name from associated reads"""
         if sample is not None:
             self.sample = sample
@@ -511,6 +530,14 @@ class Fragment():
                 if read is not None and read.has_tag('SM'):
                     self.sample = read.get_tag('SM')
                     break
+
+        if library_name is not None:
+            sample = self.sample.split('_',1)[-1]
+            self.sample = library_name+'_'+sample
+            for read in self.reads:
+                if read is not None:
+                    read.set_tag('SM',self.sample)
+                    read.set_tag('LY',library_name)
 
     def get_sample(self):
         """ Obtain the sample name associated with the fragment
@@ -727,6 +754,8 @@ class Fragment():
         return self.reads[index]
 
     def is_valid(self):
+        if self.qcfail:
+            return False
         return self.has_valid_span()
 
     def get_strand_repr(self):
@@ -832,16 +861,76 @@ class Fragment():
         self.set_meta('RZ', seq)
 
 
-class SingleEndTranscript(Fragment):
-    def __init__(self, reads, **kwargs):
-        Fragment.__init__(self, reads, **kwargs)
+
+class SingleEndTranscriptFragment(Fragment, FeatureAnnotatedObject):
+    def __init__(self, reads, features, assignment_radius=0, stranded=None, capture_locations=False, auto_set_intron_exon_features=True,**kwargs):
+
+        Fragment.__init__(self, reads, assignment_radius=assignment_radius, **kwargs)
+        FeatureAnnotatedObject.__init__(self,
+                                        features=features,
+                                        stranded=stranded,
+                                        capture_locations=capture_locations,
+                                        auto_set_intron_exon_features=auto_set_intron_exon_features )
+
+        self.match_hash = (self.sample,
+                           self.span[0],
+                           self.strand)
 
 
-        self.match_hash = (
-            self.sample,
-            self.strand,
-            reads[1].reference_end if self.strand else reads[1].reference_start,
-            )
+    def write_tags(self):
+        # First decide on what values to write
+        FeatureAnnotatedObject.write_tags(self)
+        # Additional fragment data
+        Fragment.write_tags(self)
+
+    def is_valid(self):
+        if len(self.genes)==0:
+            return False
+        return True
+
+    def annotate(self):
+        for read in self:
+            if read is None:
+                continue
+
+            read_strand = read.is_reverse
+            if self.stranded is not None and self.stranded==False:
+                read_strand=not read_strand
+
+
+            strand = ('-' if read_strand else '+')
+            read.set_tag('mr',strand)
+            for start, end in read.get_blocks():
+
+                for hit in self.features.findFeaturesBetween(
+                        chromosome=read.reference_name,
+                        sampleStart=start,
+                        sampleEnd=end,
+                        strand=(None if self.stranded is None else strand)) :
+
+                    hit_start, hit_end, hit_id, hit_strand, hit_ids = hit
+                    self.hits[hit_ids].add(
+                        (read.reference_name, (hit_start, hit_end)))
+
+                    if self.capture_locations:
+                        if not hit_id in self.feature_locations:
+                            self.feature_locations[hit_id] = []
+                        self.feature_locations[hit_id].append( (hit_start, hit_end, hit_strand))
+
+
+    def get_site_location(self):
+        return self.span[0], self.start
+
+    def __eq__(self, other):
+        # Check if the other fragment/molecule is aligned to the same gene
+        if self.match_hash != other.match_hash:
+            return False
+
+        if len(self.genes.intersection(other.genes)):
+            return self.umi_eq(other)
+
+        return False
+
 
 
 
@@ -946,6 +1035,22 @@ class FeatureCountsFullLengthFragment(FeatureCountsSingleEndFragment):
         # calculation
         return self.umi_eq(other)
 
+
+class FragmentWithoutPosition(Fragment):
+    """ Fragment without a specific location on a contig"""
+    def get_site_location(self):
+        if self.has_valid_span():
+            return self.span[0], 0
+        else:
+            return '*', 0
+
+class FragmentStartPosition(Fragment):
+    """ Fragment without a specific location on a contig"""
+    def get_site_location(self):
+        for read in self:
+            if read is not None and not read.is_unmapped:
+                return read.reference_name, read.reference_start
+        return None
 
 
 
