@@ -23,7 +23,7 @@ class RCA_Tidehunter_Flagger(DigestFlagger):
             read.set_tag("SM", self.SMTag)
             read.set_tag('CR', origin)
             # select useful added data and add tags
-            repN, read_fl, start, end, tl, tc_copies, c_score, dir_td, sub_po  = rest.split(self.separator)
+            repN, read_fl, start, end, tl, tc_copies, c_score, dir_td, sub_po = rest.split(self.separator)
             read.set_tag('TF', repN)
             read.set_tag('CL', read_fl)
             read.set_tag('TL', tl)
