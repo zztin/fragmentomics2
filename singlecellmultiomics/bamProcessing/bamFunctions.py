@@ -3,7 +3,7 @@ import pysam
 import time
 import contextlib
 from shutil import which, move
-from singlecellmultiomics.utils import BlockZip, Prefetcher
+from singlecellmultiomics.utils import BlockZip, Prefetcher, get_file_type
 import uuid
 import os
 from collections import defaultdict, Counter
@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 from typing import Generator
 from multiprocessing import Pool
+
 
 def get_index_path(bam_path: str):
     """
@@ -37,6 +38,8 @@ def _get_r1_counts_per_cell(args):
     """
     bam_path, contig, prefix = args
     cell_obs = Counter()
+
+
     with pysam.AlignmentFile(bam_path) as alignments:
         for read in alignments.fetch(contig):
             if read.is_qcfail or read.is_duplicate or not read.is_read1:
@@ -64,21 +67,53 @@ def get_r1_counts_per_cell(bam_path, prefix_with_bam=False):
 
 
     cell_obs = Counter()
-    for bam_path in bam_paths:
-        if prefix_with_bam:
-            prefix = bam_path.split('/')[-1].replace('.bam','')
-        else:
-            prefix=None
-        with Pool() as workers:
-            for cell_obs_for_contig in workers.imap_unordered(_get_r1_counts_per_cell,
-                (
-                    (bam_path, contig, prefix)
-                    for contig in get_contigs_with_reads(bam_path))
-                ):
+
+    def generate_commands(bam_paths, prefix_with_bam):
+
+        for bam_path in bam_paths:
+            if prefix_with_bam:
+                prefix = bam_path.split('/')[-1].replace('.bam','')
+            else:
+                prefix=None
+
+            for contig in get_contigs_with_reads(bam_path):
+                yield (bam_path, contig, prefix)
 
 
-                cell_obs += cell_obs_for_contig
+
+    with Pool() as workers:
+        for cell_obs_for_contig in workers.imap_unordered(
+            _get_r1_counts_per_cell,
+            generate_commands(bam_paths, prefix_with_bam)):
+
+            cell_obs += cell_obs_for_contig
+
     return cell_obs
+
+
+def get_contigs(bam: str)  -> Generator :
+    """
+    Get all contigs listed in the bam file header
+
+    Args:
+        bam_path(str): path to bam file or pysam handle
+
+
+    Returns:
+        contigs(str) list
+
+    """
+
+    if type(bam) is str:
+        with pysam.AlignmentFile(bam) as a:
+            references = a.references
+        return references
+    elif type(bam) is pysam.AlignmentFile:
+        return bam.references
+
+    raise ValueError('Supply either path to bam or pysam.AlignmentFile')
+
+
 
 
 def get_contigs_with_reads(bam_path: str, with_length: bool = False)  -> Generator :
@@ -176,7 +211,7 @@ def verify_and_fix_bam(bam_path):
                 index_missing = True
 
         if index_missing:
-            print(f"The bam file {bam_path} has an older index, attempting an index re-build ..")
+            print(f"The bam file {bam_path} has no or an older index, attempting an index re-build ..")
             pysam.index(bam_path)
             print(f"Succes!")
 
@@ -396,6 +431,7 @@ def sorted_bam_file(
         input_is_sorted=False,
         mode='wb',
         fast_compression=False, # Use fast compression for merge (-1 flag)
+        temp_prefix = 'SCMO',
         **kwargs
         ):
     """ Get writing handle to a sorted bam file
@@ -515,7 +551,8 @@ def sorted_bam_file(
             write_path,
             remove_unsorted=True,
             local_temp_sort=local_temp_sort,
-            fast_compression=fast_compression
+            fast_compression=fast_compression,
+            prefix=temp_prefix
             )
     else:
         os.rename(unsorted_path, write_path)
@@ -610,7 +647,8 @@ def sort_and_index(
         sorted_path,
         remove_unsorted=False,
         local_temp_sort=True,
-        fast_compression=False
+        fast_compression=False,
+        prefix='TMP'
         ):
     """ Sort and index a bam file
     Args:
@@ -624,9 +662,13 @@ def sort_and_index(
     Raises:
         SamtoolsError when sorting or indexing fails
     """
+
+    if prefix is None:
+        raise 'prefix cannot be None'
+
     if local_temp_sort:
         base_directory = os.path.abspath( os.path.dirname(sorted_path) )
-        prefix = f'TMP.{uuid.uuid4()}'
+        prefix = f'{prefix}.{uuid.uuid4()}'
         temp_path_first = f'{base_directory}/{prefix}'
         if temp_path_first.startswith('/TMP'):
             # Perform sort in current directory
@@ -646,6 +688,7 @@ def sort_and_index(
                     unsorted_path, ('-l 1' if fast_compression else '-l 3')
                 )
             except Exception as e:
+                print(f'Sorting failed at temp: {temp_path}')
                 failed = True
                 if i==len(temp_paths)-1:
                     raise
@@ -663,15 +706,21 @@ class MapabilityReader(Prefetcher):
 
     def __init__(self, mapability_safe_file_path, read_all=False, dont_open=True):
         self.args = locals().copy()
+        self.handle = None
         del self.args['self']
         self.mapability_safe_file_path = mapability_safe_file_path
         if not dont_open:
             self.handle = BlockZip(mapability_safe_file_path, 'r')
 
 
-    def instance(self, arg_update):
+    def instance(self, arg_update=None):
+
         if 'self' in self.args:
             del self.args['self']
+
+        if arg_update is not None:
+            self.args.update(arg_update)
+
         clone = MapabilityReader(**self.args, dont_open=False)
         return clone
 
@@ -680,6 +729,14 @@ class MapabilityReader(Prefetcher):
         clone = self.instance()
         clone.handle.read_contig_to_cache( contig, region_start=start, region_end=end)
         return clone
+
+
+    def __getitem__(self, contig_ds_strand):
+        if self.handle is None:
+            self.handle = BlockZip(self.mapability_safe_file_path, 'r')
+
+        contig, ds, strand = contig_ds_strand
+        return self.handle[contig, ds, strand]
 
     def site_is_mapable(self, contig, ds, strand):
 
@@ -800,6 +857,18 @@ def get_random_locations(bam, n):
 
     return zip(random_contigs, random_positions)
 
+def sam_to_bam(sam_in, bam_out, threads = 4):
+    """
+    Convert sam file to sorted bam file
+
+    Args:
+
+        sam_in(str) : input sam file path
+
+        bam_out(str) : output bam file path
+
+    """
+    os.system(f'samtools view {sam_in} -b | samtools sort -@ {threads} > {bam_out}; samtools index {bam_out};')
 
 
 def sample_location(handle, contig, pos,dedup=True, qc=True):
@@ -985,3 +1054,24 @@ def add_readgroups_to_header(
         replace_bam_header(origin_bam_path, hCopy,
                             target_bam_path=target_bam_path,
                             header_write_mode=header_write_mode)
+
+
+
+def mate_iter(alignments, **kwargs):
+    buffer =  dict()
+    for read in alignments.fetch(**kwargs):
+
+        if not read.is_paired or not read.is_proper_pair:
+            yield [read, None]
+
+        if read.is_qcfail or read.is_supplementary:
+            continue
+            #yield read
+
+        if read.query_name in buffer:
+            if read.is_read1:
+                yield read, buffer.pop(read.query_name)
+            elif read.is_read2:
+                yield buffer.pop(read.query_name), read
+        else:
+            buffer[read.query_name] = read

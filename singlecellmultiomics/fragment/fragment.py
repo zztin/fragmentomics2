@@ -1,10 +1,11 @@
 import itertools
-from singlecellmultiomics.utils.sequtils import hamming_distance
+from singlecellmultiomics.utils.sequtils import hamming_distance, get_consensus_dictionaries, pick_best_base_call
 import pysamiterators.iterators
 import singlecellmultiomics.modularDemultiplexer.baseDemultiplexMethods
 from singlecellmultiomics.utils import style_str
 from singlecellmultiomics.bamProcessing import get_read_group_from_read
 from singlecellmultiomics.features import FeatureAnnotatedObject
+
 complement = str.maketrans('ATCGN', 'TAGCN')
 
 
@@ -44,15 +45,18 @@ class Fragment():
 
     """
 
-    def __init__(self, reads, assignment_radius=3, umi_hamming_distance=1,
-                 R1_primer_length=0,
-                 R2_primer_length=6,
-                 tag_definitions=None,
-                 max_fragment_size = None,
+    def __init__(self, reads,
+                 assignment_radius: int = 0,
+                 umi_hamming_distance: int = 1,
+                 R1_primer_length: int = 0,
+                 R2_primer_length: int = 6,
+                 tag_definitions: list = None,
+                 max_fragment_size: int = None,
                  mapping_dir=(False, True),
-                 max_NUC_stretch = None,
-                 read_group_format=0,  # R1 forward, R2 reverse
-                 library_name=None # Overwrites the library name
+                 max_NUC_stretch: int = None,
+                 read_group_format: int = 0,  # R1 forward, R2 reverse
+                 library_name: str = None, # Overwrites the library name
+                 single_end: bool = False
                  ):
         """
         Initialise Fragment
@@ -71,7 +75,8 @@ class Fragment():
                     length of R1 primer, these bases are not taken into account when calculating a consensus
 
                 R2_primer_length(int):
-                    length of R2 primer, these bases are not taken into account when calculating a consensus
+                    length of R2 primer, these bases are not taken into account when calculating a consensus, this length is auto-detected/ overwritten when the rS tag is set
+
 
                 tag_definitions(list):
                     sam TagDefinitions
@@ -110,6 +115,7 @@ class Fragment():
         self.read_group_format = read_group_format
         self.max_NUC_stretch = max_NUC_stretch
         self.qcfail = False
+        self.single_end = single_end
 
         # Span:\
         self.span = [None, None, None]
@@ -124,40 +130,46 @@ class Fragment():
                 continue
 
             if self.max_NUC_stretch is not None and (
-                self.max_NUC_stretch*'A' in read.seq or \
-                self.max_NUC_stretch*'G' in read.seq or \
-                self.max_NUC_stretch*'T' in read.seq or \
-                self.max_NUC_stretch*'C' in read.seq ):
+                self.max_NUC_stretch*'A' in read.seq or
+                self.max_NUC_stretch*'G' in read.seq or
+                self.max_NUC_stretch*'T' in read.seq or
+                self.max_NUC_stretch*'C' in read.seq):
+
                 self.set_rejection_reason('HomoPolymer', set_qcfail=True)
                 self.qcfail=True
                 break
+
+            if read.is_qcfail:
+                self.qcfail = True
 
             if read.has_tag('rS'):
                 self.random_primer_sequence = read.get_tag('rS')
                 self.unsafe_trimmed = True
                 self.R2_primer_length = 0 # Set R2 primer length to zero, as the primer has been removed
+
             if not read.is_unmapped:
                 self.is_mapped = True
             if read.mapping_quality > 0:
                 self.is_multimapped = False
             self.mapping_quality = max(
                 self.mapping_quality, read.mapping_quality)
+
             if i == 0:
                 if read.is_read2:
-                    raise ValueError('Supply first R1 then R2')
+                    if not read.is_qcfail:
+                        raise ValueError('Supply first R1 then R2')
                 read.is_read1 = True
                 read.is_read2 = False
             elif i == 1:
                 read.is_read1 = False
                 read.is_read2 = True
-
-
         self.set_sample(library_name=library_name)
+        self.update_umi()
         if self.qcfail:
             return
         self.set_strand(self.identify_strand())
         self.update_span()
-        self.update_umi()
+
 
     def write_tensor(self, chromosome=None, span_start=None, span_end=None, height=30, index_start=0,
                      base_content_table=None,
@@ -304,11 +316,9 @@ class Fragment():
         else:
             return ri + index_start + 1
 
+    def get_read_group(self, with_attr_dict=False) -> str:
 
-    def get_read_group(self, with_attr_dict=False):
-
-
-        rg_id=None
+        r = None
         for read in self.reads:
             if read is None:
                 continue
@@ -340,9 +350,13 @@ class Fragment():
         self.set_meta('RG', self.get_read_group())
         if self.has_valid_span():
             # Write fragment size:
-            self.set_meta('fS', self.get_fragment_size())
-            self.set_meta('fe', self.span[1])
-            self.set_meta('fs', self.span[2])
+            if self.safe_span:
+                self.set_meta('fS', self.estimated_length)
+                self.set_meta('fe', self.span[1])
+                self.set_meta('fs', self.span[2])
+            else:
+                self.remove_meta('fS')
+
 
         else:
             self.set_rejection_reason('FS', set_qcfail=True)
@@ -394,6 +408,10 @@ class Fragment():
 
         if R2 is None or R2.query_sequence is None:
             return None, None, None
+
+        if self.R2_primer_length == 0 and self.random_primer_sequence is None:
+            return None, None, None
+
         # The read was not mapped
         if R2.is_unmapped:
             # Guess the orientation does not matter
@@ -413,6 +431,13 @@ class Fragment():
             return(R2.reference_name, R2.reference_start, R2.query_sequence[:self.R2_primer_length])
         raise ValueError()
 
+    def remove_meta(self,key):
+        for read in self:
+            if read is not None:
+                if read.has_tag(key):
+                    read.set_tag(key,None)
+
+
     def set_meta(self, key, value, as_set=False):
         self.meta[key] = value
         for read in self:
@@ -421,7 +446,7 @@ class Fragment():
 
                     data = set(read.get_tag(key).split(','))
                     data.add(value)
-                    read.set_tag(key, ','.join(list(data)))
+                    read.set_tag(key, ','.join(sorted(list(data))))
 
                 else:
                     read.set_tag(key, value)
@@ -472,6 +497,72 @@ class Fragment():
             return False
         return self.reads[1] is not None
 
+    @property
+    def R1(self):
+        return self.reads[0]
+
+    @property
+    def R2(self):
+        return self.reads[1]
+
+    def get_consensus(self, only_include_refbase: str = None, dove_safe: bool = False, **get_consensus_dictionaries_kwargs) -> dict:
+        """
+        a dictionary of (reference_pos) : (qbase, quality, reference_base) tuples
+
+        Args:
+            only_include_refbase(str) : Only report bases aligned to this reference base, uppercase only
+            dove_safe(bool) : Only report bases supported within R1 and R2 start and end coordinates
+
+        Returns:
+            consensus(dict) : {reference_position: (qbase, quality)
+        """
+        r1_consensus, r2_consensus = get_consensus_dictionaries(
+                self.R1,
+                self.R2,
+                only_include_refbase=only_include_refbase,
+                dove_safe=dove_safe,
+                **get_consensus_dictionaries_kwargs)
+
+        return {
+            ref_pos:pick_best_base_call( r1_consensus.get(ref_pos) , r2_consensus.get(ref_pos) )
+            for ref_pos in set(r1_consensus.keys()).union(set(r2_consensus.keys()))
+        }
+
+
+    @property
+    def estimated_length(self) -> int:
+        """
+        Obtain the estimated size of the fragment,
+        returns None when estimation is not possible
+        Takes into account removed bases (R2)
+        Assumes inwards sequencing orientation, except when self.single_end is set
+        """
+        if self.single_end:
+            if self[0] is None:
+                return None
+            return self[0].reference_end - self[0].reference_start
+
+
+        if self.has_R1() and self.has_R2():
+
+            contig = self.R1.reference_name
+            if self.R1.is_reverse and not self.R2.is_reverse:
+                start, end = self.R2.reference_start - self.R2_primer_length, self.R1.reference_end
+                if start<end:
+                    return end - start
+                else:
+                    return None
+            elif not self.R1.is_reverse and self.R2.is_reverse:
+                start, end = self.R1.reference_start, self.R2.reference_end + self.R2_primer_length
+                if start<end:
+                    return end - start
+                else:
+                    return None
+            else:
+                return None
+        return None
+
+
     def update_span(self):
         """
         Update the span (the location the fragment maps to) stored in Fragment
@@ -480,35 +571,68 @@ class Fragment():
         The contig is determined by the reference_name assocated to the first
         mapped read in self.reads
 
+        This calculation assumes the reads are sequenced inwards and
+        dove-tails of the molecule cannot be trusted
         """
 
         contig = None
-
         start = None
         end = None
-        for read in self.reads:
-            if read is not None and not read.is_unmapped:
-                if contig is None:
+
+
+        if self.has_R1() and self.has_R2() and \
+           self.R1.reference_start is not None and self.R1.reference_end is not None and \
+           self.R2.reference_start is not None and self.R2.reference_end is not None :
+
+            contig = self.R1.reference_name
+            if self.R1.is_reverse and not self.R2.is_reverse:
+                start, end = self.R2.reference_start, self.R1.reference_end
+                self.safe_span = True
+            elif not self.R1.is_reverse and self.R2.is_reverse:
+                start, end = self.R1.reference_start, self.R2.reference_end
+                self.safe_span = True
+            else:
+                start = min(self.R1.reference_start, self.R2.reference_start)
+                end = max(self.R1.reference_start, self.R2.reference_start)
+                self.safe_span = False
+
+        elif self.has_R1() and self.R1.reference_start is not None and self.R1.reference_end is not None :
+            contig = self.R1.reference_name
+            start, end = self.R1.reference_start, self.R1.reference_end
+            self.safe_span = False
+
+        elif self.has_R2()  and self.R2.reference_start is not None and self.R2.reference_end is not None :
+            contig = self.R2.reference_name
+            start, end = self.R2.reference_start, self.R2.reference_end
+            self.safe_span = False
+        else:
+
+            # Its Sometimes possible that no cigar is set for the alignment, only a start coordinate
+
+            for read in self:
+                if read is None:
+                    continue
+                if len(read.cigar)!=0:
+                    raise NotImplementedError("Non implemented span")
+                if read.reference_start is not None:
+                    start,end = read.reference_start, read.reference_start
                     contig = read.reference_name
-                if contig == read.reference_name:
+                else:
+                    raise NotImplementedError("Non implemented span, undefined alignment, and not start coordinate")
 
-                    if start is None:
-                        start = read.reference_start
-                    else:
-                        start = min(start, read.reference_start)
 
-                    if end is None:
-                        end = read.reference_end
-                    else:
-                        end = max(end, read.reference_end)
+
 
         self.span = (contig, start, end)
 
+    @property
+    def aligned_length(self):
+        return self.span[2]-self.span[1]
 
-    def get_span(self):
+    def get_span(self) -> tuple:
         return self.span
 
-    def has_valid_span(self):
+    def has_valid_span(self) -> bool:
 
         # Check if the span could be calculated:
         defined_span = not any([x is None for x in self.get_span()])
@@ -518,10 +642,9 @@ class Fragment():
         if self.max_fragment_size is not None and self.get_fragment_size()>self.max_fragment_size:
             return False
 
-
         return True
 
-    def set_sample(self, sample=None, library_name=None):
+    def set_sample(self, sample: str = None, library_name: str = None):
         """Force sample name or obtain sample name from associated reads"""
         if sample is not None:
             self.sample = sample
@@ -532,14 +655,14 @@ class Fragment():
                     break
 
         if library_name is not None:
-            sample = self.sample.split('_',1)[-1]
+            sample = self.sample.split('_', 1)[-1]
             self.sample = library_name+'_'+sample
             for read in self.reads:
                 if read is not None:
-                    read.set_tag('SM',self.sample)
-                    read.set_tag('LY',library_name)
+                    read.set_tag('SM', self.sample)
+                    read.set_tag('LY', library_name)
 
-    def get_sample(self):
+    def get_sample(self) -> str:
         """ Obtain the sample name associated with the fragment
         The sample name is extracted from the SM tag of any of the associated reads.
 
@@ -556,7 +679,7 @@ class Fragment():
         """
         return(sum(read is not None for read in self.reads))
 
-    def set_strand(self, strand):
+    def set_strand(self, strand: bool):
         """Set mapping strand
 
         Args:
@@ -624,11 +747,14 @@ class Fragment():
             >>> frag_A.umi_eq(frag_B) # This returns True, the distance is 1, which is the (umi_hamming_distance)
             True
         """
+
         if self.umi == other.umi:
             return True
         if self.umi_hamming_distance == 0:
             return False
         else:
+            if len(self.umi)!=len(other.umi):
+                return False
             return hamming_distance(
                 self.umi, other.umi) <= self.umi_hamming_distance
 
@@ -697,7 +823,7 @@ class Fragment():
             >>> read_B.reference_start = 150
             >>> read_A.reference_start = 100
             >>> frag_B = Fragment([read_B],assignment_radius=300)
-            >>> frag_A = Fragment([read_A],,assignment_radius=300)
+            >>> frag_A = Fragment([read_A],assignment_radius=300)
             >>> frag_A == frag_B
             True
 
@@ -730,6 +856,9 @@ class Fragment():
             return False
 
         if self.strand != other.strand:
+            return False
+
+        if not self.has_valid_span() or not other.has_valid_span():
             return False
 
         if min(abs(self.span[1] -
@@ -768,15 +897,22 @@ class Fragment():
             return '+'
 
     def __repr__(self):
-        return f"""Fragment:
+        rep =  f"""Fragment:
         sample:{self.get_sample()}
         umi:{self.get_umi()}
-        span:{('%s %s-%s' % self.get_span())}
+        span:{('%s %s-%s' % self.get_span() if self.has_valid_span() else 'no span')}
         strand:{self.get_strand_repr()}
         has R1: {"yes" if self.has_R1() else "no"}
         has R2: {"yes" if self.has_R2() else "no"}
         randomer trimmed: {"yes" if self.unsafe_trimmed else "no"}
-        """ + '\n\t'.join([f'{key}:{str(value)}' for key, value in self.meta.items()])
+        """
+
+        try:
+            rep += '\n\t'.join([f'{key}:{str(value)}' for key, value in self.meta.items()])
+        except Exception as e:
+            print(self.meta)
+            raise
+        return rep
 
     def get_html(
             self,

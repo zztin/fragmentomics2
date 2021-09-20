@@ -18,7 +18,7 @@ from pysamiterators import MatePairIteratorIncludingNonProper, MatePairIterator
 from singlecellmultiomics.universalBamTagger.tagging import generate_tasks, prefetch, run_tagging_tasks
 from singlecellmultiomics.bamProcessing.bamBinCounts import blacklisted_binning_contigs,get_bins_from_bed_iter
 from singlecellmultiomics.utils.binning import bp_chunked
-from singlecellmultiomics.bamProcessing import merge_bams, get_contigs_with_reads
+from singlecellmultiomics.bamProcessing import merge_bams, get_contigs_with_reads, sam_to_bam
 from singlecellmultiomics.fastaProcessing import CachedFastaNoHandle
 from singlecellmultiomics.utils.prefetch import UnitialisedClass
 from multiprocessing import Pool
@@ -32,12 +32,13 @@ import pkg_resources
 import pickle
 from datetime import datetime
 from time import sleep
-
+# Supress [E::idx_find_and_load] Could not retrieve index file for, see https://github.com/pysam-developers/pysam/issues/939
+pysam.set_verbosity(0)
 
 argparser = argparse.ArgumentParser(
     formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     description='Assign molecules, set sample tags, set alleles')
-argparser.add_argument('bamin', type=str)
+argparser.add_argument('bamin', type=str, help='Input BAM file, SAM files can also be supplied but will be converted to BAM')
 argparser.add_argument(
     '-ref',
     type=str,
@@ -49,6 +50,7 @@ argparser.add_argument(
     '-method',
     type=str,
     default=None,
+    required=True,
     help="""Protocol to tag, select from:nla, qflag, chic, nla_transcriptome, vasa, cs, cs_feature_counts,  nla_taps ,chic_taps, nla_no_overhang. nla (Data with digested by Nla III enzyme)
     nla (Data with digested by Nla III enzyme)
     qflag (Only add basic tags like sampple and UMI, no molecule assignment)
@@ -102,6 +104,12 @@ allele_gr.add_argument(
     help='Makes the allele resolver print more')
 
 allele_gr.add_argument(
+    '--haplo_molecule_assignment',
+    action='store_true',
+    help='Take allele information into account during molecule assignment ')
+
+
+allele_gr.add_argument(
     '--use_allele_cache',
     action='store_true',
     help='''Write and use a cache file for the allele information. NOTE: THIS IS NOT THREAD SAFE! Meaning you should not use this function on multiple libraries at the same time when the cache files are not yet available.
@@ -115,6 +123,15 @@ argparser.add_argument(
     '--multiprocess',
     action='store_true',
     help="Use multiple the CPUs of you system to achieve (much) faster tagging")
+
+
+argparser.add_argument(
+    '--one_contig_per_process',
+    action='store_true',
+    help="Do not split contigs/chromosomes into chunks for parallel processing. Use this when you want to correctly deduplicate mates which are mapping very far apart. (>50kb)")
+
+
+
 argparser.add_argument(
     '-tagthreads',
     type=int,
@@ -164,6 +181,11 @@ fragment_settings.add_argument(
     '--no_overflow',
     action='store_true',
     help='Do not write overflow reads to output file. Overflow reads are reads which are discarded because the molecule reached the maximum capacity of associated fragments')
+
+fragment_settings.add_argument(
+    '--no_restriction_motif_check',
+    action='store_true',
+    help='Do not check for restriction motifs (NLAIII)')
 
 
 molecule_settings = argparser.add_argument_group('Molecule settings')
@@ -508,7 +530,7 @@ def run_multiome_tagging(args):
 
     Arguments:
 
-        bamin (str) : bam file to process
+        bamin (str) : bam file to process, sam files can also be supplied but will be converted
 
         o(str) : path to output bam file
 
@@ -594,6 +616,12 @@ def run_multiome_tagging(args):
             "Supply an output which ends in .bam, for example -o output.bam")
 
     write_status(args.o,'unfinished')
+
+    # verify wether the input is SAM, if so we need to convert:
+    if args.bamin.endswith('.sam'):
+        print('Input file is in SAM format. Performing conversion.')
+        bam_path =  args.bamin.replace('.sam','.bam')
+        args.bamin, _ = bam_path, sam_to_bam(args.bamin, bam_path)
 
     # Verify wether the input file is indexed and sorted...
     if not args.ignore_bam_issues:
@@ -750,7 +778,9 @@ def run_multiome_tagging(args):
         bp_per_segment = 50_000
         fragment_size = 1000
         if max_time_per_segment is None:
-            max_time_per_segment = 20 # 20 seconds should be plenty for 50kb
+            max_time_per_segment = 120 # 120 seconds should be plenty for 50kb
+
+
 
     elif args.method == 'nla' or args.method == 'nla_no_overhang':
         molecule_class = singlecellmultiomics.molecule.NlaIIIMolecule
@@ -764,7 +794,7 @@ def run_multiome_tagging(args):
                 })
         bp_per_job = 10_000_000
         bp_per_segment = 10_000_000
-        fragment_size = 500
+        fragment_size = 1000
 
     elif args.method == 'chic_nla':
         molecule_class=singlecellmultiomics.molecule.CHICNLAMolecule
@@ -776,7 +806,7 @@ def run_multiome_tagging(args):
 
         bp_per_job = 5_000_000
         bp_per_segment = 50_000
-        fragment_size = 500
+        fragment_size = 1000
 
     elif args.method == 'cs_feature_counts' :
         molecule_class = singlecellmultiomics.molecule.Molecule
@@ -795,6 +825,7 @@ def run_multiome_tagging(args):
         molecule_class = singlecellmultiomics.molecule.AnnotatedNLAIIIMolecule
         fragment_class = singlecellmultiomics.fragment.NlaIIIFragment
 
+        molecule_class_args.update(transcriptome_feature_args)
         molecule_class_args.update({
             'stranded': None  # data is not stranded
         })
@@ -802,9 +833,12 @@ def run_multiome_tagging(args):
 
         molecule_class = singlecellmultiomics.molecule.AnnotatedCHICMolecule
         fragment_class = singlecellmultiomics.fragment.CHICFragment
-        bp_per_job = 5_000_000
+        bp_per_job = 100_000_000 # One contig at a time to prevent reading the annotations too much
         bp_per_segment = 500_000
         fragment_size = 50_000
+
+        molecule_class_args.update(transcriptome_feature_args)
+
 
     elif args.method == 'nla_taps':
         molecule_class = singlecellmultiomics.molecule.TAPSNlaIIIMolecule
@@ -819,7 +853,7 @@ def run_multiome_tagging(args):
         else:
             bp_per_job = 5_000_000
         bp_per_segment = 1_000_000
-        fragment_size = 500
+        fragment_size = 1000
     elif args.method == 'nla_taps_transcriptome': # Annotates reads in transcriptome
         molecule_class = singlecellmultiomics.molecule.AnnotatedTAPSNlaIIIMolecule
         fragment_class = singlecellmultiomics.fragment.NlaIIIFragment
@@ -905,6 +939,11 @@ def run_multiome_tagging(args):
     if args.allow_cycle_shift and fragment_class is singlecellmultiomics.fragment.NlaIIIFragment:
         fragment_class_args['allow_cycle_shift'] = True
 
+
+    # This disables restriction motif checking
+    if args.no_restriction_motif_check:
+        fragment_class_args['check_motif'] = False
+
     # This disables umi_cigar_processing:
     if args.no_umi_cigar_processing:
         fragment_class_args['no_umi_cigar_processing'] = True
@@ -938,7 +977,9 @@ def run_multiome_tagging(args):
         region_start = None
         region_end = None
 
-
+    # Overwrite this flag when it is set:
+    if args.one_contig_per_process:
+        one_contig_per_process=True
 
     last_update = datetime.now()
     init_time = datetime.now()
@@ -983,13 +1024,14 @@ def run_multiome_tagging(args):
         'fragment_class_args': fragment_class_args,
         'yield_invalid': yield_invalid,
         'yield_overflow': yield_overflow,
-        'start':region_start,
-        'end':region_end,
+        'start': region_start,
+        'end': region_end,
         'contig': contig,
         'every_fragment_as_molecule': every_fragment_as_molecule,
         'skip_contigs':skip_contig,
         'progress_callback_function':progress_callback_function,
-        'pooling_method' : pooling_method
+        'pooling_method' : pooling_method,
+        'perform_allele_clustering': args.haplo_molecule_assignment and molecule_class_args.get('allele_resolver', None) is not None
     }
 
 

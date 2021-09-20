@@ -23,6 +23,7 @@ class DemultiplexingStrategyLoader:
             moduleSearchDir='demultiplexModules',
             indexParser=None,
             ignoreMethods=None,
+            only_detect_methods=None, #
             indexFileAlias=None):
         package = f'singlecellmultiomics.modularDemultiplexer.{moduleSearchDir}'
         moduleSearchPath = os.path.join(
@@ -33,6 +34,7 @@ class DemultiplexingStrategyLoader:
             '/')
         self.barcodeParser = barcodeParser
         self.indexParser = indexParser
+        self.only_detect_methods = only_detect_methods
         moduleSearchPath = moduleSearchPath
 
         #print(f'{Style.DIM}Current script location: {__file__}')
@@ -59,18 +61,34 @@ class DemultiplexingStrategyLoader:
             dm.SCCHIC_384w_c8_u3,
             dm.SCCHIC_384w_c8_u3_cs2,
             dm.SCCHIC_384w_c8_u3_pdt,
+            dm.SCCHIC_384w_c8_u3_direct_ligation,
+            dm.SCCHIC_384w_c8_u3_direct_ligation_SINGLE_END,
+
             dm.MSPJI_c8_u3,
             dm.ScartraceR2,
-            dm.ScartraceR1
+            dm.ScartraceR1,
+            dm.ScartraceR2RP4,
+
+            dm.chrom10x_c16_u12
 
 
         ]
         for c in self.demux_classes:
-            self.demultiplexingStrategies.append(c(
+
+
+            initialised_demux = c(
                 barcodeFileParser=barcodeParser,
                 indexFileParser=indexParser,
                 indexFileAlias=indexFileAlias)
-            )
+
+            if self.only_detect_methods is not None:
+
+                if initialised_demux.shortName in self.only_detect_methods:
+                    print(f'Only loading {initialised_demux.shortName}')
+                else:
+                    continue
+
+            self.demultiplexingStrategies.append(initialised_demux)
 
 
     def getSelectedStrategiesFromStringList(self, strList, verbose=True):

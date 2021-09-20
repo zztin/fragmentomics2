@@ -10,10 +10,12 @@ class NlaIIIFragment(Fragment):
                  assignment_radius=1_000,
                  umi_hamming_distance=1,
                  invert_strand=False,
+                 check_motif=True,
                  no_overhang =False, # CATG is present OUTSIDE the fragment
                  cut_location_offset=-4,
                  reference=None, #Reference is required when no_overhang=True
                  allow_cycle_shift=False,
+                 use_allele_tag = False, # Use existing DA tag for molecule deduplication
                  no_umi_cigar_processing=False, **kwargs
                  ):
         self.invert_strand = invert_strand
@@ -22,8 +24,13 @@ class NlaIIIFragment(Fragment):
         self.allow_cycle_shift = allow_cycle_shift
         self.cut_location_offset = cut_location_offset
         self.no_umi_cigar_processing= no_umi_cigar_processing
+        self.use_allele_tag = use_allele_tag
+        self.check_motif=check_motif
+
         if self.no_overhang and reference  is None:
             raise ValueError('Supply a reference handle when no_overhang=True')
+        if self.no_overhang and not self.check_motif:
+            raise ValueError('no_overhang=True is not compatible with check_motif=False, as there is no way to deduplicate. Consider using method "chic"')
 
         Fragment.__init__(self,
                           reads,
@@ -35,19 +42,46 @@ class NlaIIIFragment(Fragment):
         self.strand = None
         self.site_location = None
         self.cut_site_strand = None
-        self.identify_site()
+        if self.identify_site():
+
+            self.found_valid_site = True
+        else:
+            self.found_valid_site = False
+
         if self.is_valid():
-            self.match_hash = (
-                self.strand,
-                self.cut_site_strand,
-                self.site_location[0],
-                self.site_location[1],
-                self.sample)
+
+            if self.use_allele_tag:
+
+                allele = 'n'
+                for read in self.reads:
+                    if read is not None and read.has_tag('DA'):
+                        allele = read.get_tag('DA')
+
+                self.match_hash = (
+                    allele,
+                    self.strand,
+                    self.cut_site_strand,
+                    self.site_location[0],
+                    self.site_location[1],
+                    self.sample)
+
+            else:
+                self.match_hash = (
+                    self.strand,
+                    self.cut_site_strand,
+                    self.site_location[0],
+                    self.site_location[1],
+                    self.sample)
         else:
             self.match_hash = None
 
-    def set_site(self, site_chrom, site_pos, site_strand=None):
-        self.set_meta('DS', site_pos)
+    def set_site(self, site_chrom, site_pos, site_strand=None, valid=True):
+
+        if not valid :
+            self.found_valid_site=False
+        if self.found_valid_site:
+            self.set_meta('DS', site_pos)
+
         if site_strand is not None:
             if self.invert_strand:
                 self.set_meta('RS', not site_strand)
@@ -115,7 +149,7 @@ class NlaIIIFragment(Fragment):
 
 
     def identify_site(self):
-
+        self.found_valid_site = False
         R1, R2 = self.reads
         """ Valid configs:
         CATG######## R1 ########## ^ ########## R2 ##########
@@ -138,25 +172,28 @@ class NlaIIIFragment(Fragment):
             return None
 
         if self.no_overhang:
+
             # scan 3 bp of sequence for CATG
             scan_extra_bp = 3
+            site_coordinate = None
             if R1.is_reverse:
-                rev_motif = self.reference.fetch(R1.reference_name, R1.reference_end-self.cut_location_offset, R1.reference_end+4-self.cut_location_offset+scan_extra_bp)
-                forward_motif=None
-                if 'CATG' in rev_motif:
-                    rev_motif='CATG'
-                else:
-                    self.set_recognized_sequence(rev_motif)
-                    return None
+                motif = self.reference.fetch(R1.reference_name, R1.reference_end, R1.reference_end-self.cut_location_offset+scan_extra_bp)
+                if 'CATG' in motif:
+                    offset = motif.find('CATG')
+                    site_coordinate = R1.reference_end + offset
             else:
-                rev_motif=None
-                forward_motif = self.reference.fetch(R1.reference_name,  R1.reference_start-4+self.cut_location_offset-scan_extra_bp,  R1.reference_start+self.cut_location_offset)
-                if 'CATG' in forward_motif:
-                    forward_motif='CATG'
-                else:
-                    self.set_recognized_sequence(forward_motif)
-                    return None
+                motif = self.reference.fetch(R1.reference_name,  R1.reference_start+self.cut_location_offset-scan_extra_bp,  R1.reference_start)
+                if 'CATG' in motif:
+                    offset = motif[::-1].find('GTAC')
+                    site_coordinate = R1.reference_start - offset - 4
 
+            if site_coordinate is None:
+                self.set_rejection_reason('no_CATG_in_ref', set_qcfail=True)
+                return None
+
+            self.set_site(site_strand=R1.is_reverse, site_chrom=R1.reference_name, site_pos=site_coordinate)
+            self.set_recognized_sequence(motif)
+            return site_coordinate
 
         else:
             forward_motif = R1.seq[:4]
@@ -172,30 +209,31 @@ class NlaIIIFragment(Fragment):
                 if R1.cigartuples[0][0]==4: # softclipped at start
                     r1_start-=R1.cigartuples[0][1]
 
-        if forward_motif == 'CATG' and not R1.is_reverse:
+        if (not self.check_motif or forward_motif == 'CATG') and not R1.is_reverse: # Not reverse = forward
             rpos = (R1.reference_name, r1_start)
-            self.set_site(site_strand=1, site_chrom=rpos[0], site_pos=rpos[1])
-            self.set_recognized_sequence('CATG')
+            self.set_site(site_strand=R1.is_reverse, site_chrom=rpos[0], site_pos=rpos[1])
+            self.set_recognized_sequence(forward_motif)
             return(rpos)
-        elif rev_motif == 'CATG' and R1.is_reverse:
+        elif (not self.check_motif or rev_motif == 'CATG') and R1.is_reverse:
             rpos = (R1.reference_name, r1_start - 4)
-            self.set_site(site_strand=0, site_chrom=rpos[0], site_pos=rpos[1])
-            self.set_recognized_sequence('CATG')
+            self.set_site(site_strand=R1.is_reverse, site_chrom=rpos[0], site_pos=rpos[1])
+            self.set_recognized_sequence(rev_motif)
             return(rpos)
 
         # Sometimes the cycle is off, this is dangerous though because the cell barcode and UMI might be shifted too!
         elif self.allow_cycle_shift and  forward_motif.startswith( 'ATG') and not R1.is_reverse:
             rpos = (R1.reference_name, R1.reference_start - 1)
-            self.set_site(site_strand=1, site_chrom=rpos[0], site_pos=rpos[1])
+            self.set_site(site_strand=R1.is_reverse, site_chrom=rpos[0], site_pos=rpos[1])
             self.set_recognized_sequence('ATG')
             return(rpos)
         elif self.allow_cycle_shift and rev_motif.startswith( 'ATG') and R1.is_reverse:  # First base was trimmed or lost
             rpos = (R1.reference_name, R1.reference_end - 3)
-            self.set_site(site_strand=0, site_chrom=rpos[0], site_pos=rpos[1])
+            self.set_site(site_strand=R1.is_reverse, site_chrom=rpos[0], site_pos=rpos[1])
             self.set_recognized_sequence('CAT')
             return(rpos)
 
         else:
+
             if forward_motif == 'CATG' and R1.is_reverse:
                 self.set_rejection_reason('found CATG R1 REV exp FWD', set_qcfail=True)
 
@@ -204,6 +242,13 @@ class NlaIIIFragment(Fragment):
             else:
                 self.set_rejection_reason('no CATG', set_qcfail=True)
 
+            # Every fragment needs to have a site. Otherwise it will get lost. Use R1 start location as anchor
+            if R1.is_reverse:
+                rpos = (R1.reference_name, r1_start - 4)
+            else:
+                rpos = (R1.reference_name, r1_start)
+
+            self.set_site(site_strand=R1.is_reverse, site_chrom=rpos[0], site_pos=rpos[1], valid=False)
             return None
 
     def get_undigested_site_count(self, reference_handle):
@@ -233,6 +278,8 @@ class NlaIIIFragment(Fragment):
         return total
 
     def is_valid(self):
+        if self.qcfail:
+            return False
 
         try:
             if self.max_fragment_size is not None and self.get_fragment_size()>self.max_fragment_size:
@@ -240,14 +287,32 @@ class NlaIIIFragment(Fragment):
                 return False
         except TypeError:
             pass
-        return self.site_location is not None
+
+        return self.found_valid_site
 
     def get_site_location(self):
-        return self.site_location
+        if self.site_location is not None:
+            return self.site_location
+        else:
+            # We need some kind of coordinate...
+            for read in self:
+                if read is not None and read.reference_name is not None and read.reference_start is not None:
+                    return read.reference_name, read.reference_start
 
     def __repr__(self):
-        return Fragment.__repr__(
-            self) + f'\n\tRestriction site:{self.get_site_location()}'
+        site_loc = self.get_site_location()
+
+        if site_loc is None or len(site_loc)==0:
+            return Fragment.__repr__(
+            self) + f'\n\tNo restriction site found'
+        else:
+            site_def_str = f'\n\tRestriction site:{site_loc[0]}:{site_loc[1]}'
+            try:
+                return Fragment.__repr__(
+                    self) + site_def_str
+            except Exception as e:
+                print(self.get_site_location())
+                raise
 
     def __eq__(self, other):
         # Make sure fragments map to the same strand, cheap comparisons

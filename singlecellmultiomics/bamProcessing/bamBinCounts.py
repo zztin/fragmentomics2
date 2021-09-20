@@ -8,7 +8,7 @@ import pickle
 import gzip
 import pandas as pd
 import multiprocessing
-from singlecellmultiomics.bamProcessing import get_contig_sizes, get_contig_size
+from singlecellmultiomics.bamProcessing import get_contig_sizes, get_contig_size, get_contigs
 from statsmodels.nonparametric.smoothers_lowess import lowess
 from datetime import datetime
 from itertools import chain
@@ -17,7 +17,276 @@ from typing import Generator
 from singlecellmultiomics.methylation import MethylationCountMatrix
 from pysamiterators import CachedFasta
 from pysam import FastaFile
-from singlecellmultiomics.utils import reverse_complement
+from singlecellmultiomics.utils import reverse_complement, is_main_chromosome, pool_wrapper
+from collections import defaultdict, Counter
+from itertools import product
+from singlecellmultiomics.bamProcessing.bamFunctions import mate_iter
+from multiprocessing import Pool
+from singlecellmultiomics.pyutils import sorted_slice
+
+
+def _generate_count_dict(args):
+    """
+    Obtain counts for a bam path, given a bin size and region
+
+    args:
+        args (tuple) : bam_path, bin_size, contig, start, stop
+    """
+    bam_path, bin_size, contig, start, stop, filter_function = args #reference_path  = args
+
+    #reference_handle = pysam.FastaFile(reference_path)
+    #reference = CachedFasta(reference_handle)
+
+    cut_counts = defaultdict(Counter )
+    i = 0
+    with pysam.AlignmentFile(bam_path) as alignments:
+
+        for R1,R2 in mate_iter(alignments, contig=contig, start=start, stop=stop):
+
+            if filter_function is None:
+                if R1 is None or R1.is_duplicate or R1.is_qcfail:
+                    continue
+            else:
+                if not filter_function(R1,R2):
+                    continue
+
+            if not R1.has_tag('DS'):
+                cut_pos = R1.reference_end if  R1.is_reverse else R1.reference_start
+            else:
+                cut_pos = int(R1.get_tag('DS'))
+
+            if cut_pos is None:
+                continue
+
+            if R1.has_tag('SM'):
+                sample = R1.get_tag('SM')
+            else:
+                sample = 'No_Sample'
+
+            bin_idx=int(cut_pos/bin_size)*bin_size
+            cut_counts[(contig,bin_idx)][sample] += 1
+
+    return cut_counts, contig, bam_path
+
+# cell-> context -> obs
+def _generate_count_dict_prefixed(args):
+
+    bam_path, bin_size, contig, start, stop, filter_function,  alias, prefix = args #reference_path  = args
+
+    cut_counts = defaultdict(Counter )
+    i = 0
+    with pysam.AlignmentFile(bam_path) as alignments:
+
+        for R1,R2 in mate_iter(alignments, contig=contig, start=start, stop=stop):
+
+            if filter_function is None:
+                if R1 is None or R1.is_duplicate or not R1.has_tag('DS') or R1.is_qcfail:
+                    continue
+            else:
+                if not filter_function(R1,R2):
+                    continue
+
+            cut_pos = R1.get_tag('DS')
+            sample = R1.get_tag('SM')
+
+            if prefix is not None:
+                sample = (prefix, sample)
+
+            if alias is not None:
+
+                cut_counts[alias][sample] += 1
+            else:
+                bin_idx=int(cut_pos/bin_size)*bin_size
+
+                cut_counts[(contig,bin_idx)][sample] += 1
+
+    return cut_counts, contig, bam_path
+
+# Get TA fraction per cell
+def _generate_ta_count_dict_prefixed(args):
+
+    bam_path, bin_size, contig, start, stop, filter_function, alias, prefix = args
+
+    cut_counts = defaultdict(Counter )
+    i = 0
+    with pysam.AlignmentFile(bam_path) as alignments:
+
+        for R1,R2 in mate_iter(alignments, contig=contig, start=start, stop=stop):
+
+            if R1 is None or R1.is_duplicate or not R1.has_tag('DS') or R1.is_qcfail:
+                continue
+            if R1.get_tag('lh')!='TA':
+                continue
+
+            if filter_function is not None and not filter_function(R1,R2):
+                continue
+
+            cut_pos = R1.get_tag('DS')
+            sample = R1.get_tag('SM')
+            if prefix is not None:
+                sample = (prefix, sample)
+
+            if alias is not None:
+
+                cut_counts[alias][sample] += 1
+            else:
+                bin_idx=int(cut_pos/bin_size)*bin_size
+
+                cut_counts[(contig,bin_idx)][sample] += 1
+
+    return cut_counts, contig, bam_path
+
+
+
+def _get_contig_cuts(bam: str, contig: str, mqthreshold=50):
+    """
+    Obtain np.array of all cuts for the supplied contig and bam file for each sample indiviually,
+    the cut arrays are sorted by genomic coordinate
+
+    Returns:
+        contig, {cell: np.array([cut1(int),cut2(int)])}
+    """
+    single_cell_cuts = defaultdict(list)
+    with pysam.AlignmentFile(bam) as a:
+        for read in a.fetch(contig):
+            if read.is_read1 and not read.is_qcfail and not read.is_duplicate and read.mapping_quality>mqthreshold:
+                single_cell_cuts[read.get_tag('SM')].append(read.get_tag('DS'))
+
+    return contig, {
+
+        cell:np.array(sorted(cuts))
+        for cell, cuts in single_cell_cuts.items()
+    }
+
+
+def bam_to_single_sample_cuts(bams: list, n_processes=None, contigs=None, mqthreshold=50):
+    """
+    Obtain np.array of all cuts for the supplied contig and bam file for each sample indiviually,
+    the cut arrays are sorted by genomic coordinate
+    When contigs is not supplied cuts are determined for all contigs except random scaffolds and alternative alleles
+
+    Returns:
+        cell_cuts: {cell: {contig: np.array([cut1(int),cut2(int)])}},
+        total_cuts_per_cell : {cell:total_cuts (int)}
+    """
+
+    cell_cuts = {} # cell -> contig -> cuts
+    total_cuts_per_cell = Counter()
+    with Pool(n_processes) as workers:
+        if contigs is None:
+            contigs = [c for c in get_contigs(bams[0]) if is_main_chromosome(c)]
+
+
+        for contig, cuts in workers.imap(pool_wrapper, ((
+            _get_contig_cuts, {'contig':contig,
+                               'bam':bam,
+                               'mqthreshold':mqthreshold
+                               })
+
+            for contig, bam in  product(contigs,bams))):
+
+            for cell, cc in cuts.items():
+                if not cell in cell_cuts:
+                    cell_cuts[cell] = {}
+                cell_cuts[cell][contig] = cc
+                total_cuts_per_cell[cell] += len(cc)
+
+    return cell_cuts, total_cuts_per_cell
+
+
+def get_binned_counts_prefixed(bam_dict, bin_size, regions=None, ta=False, filter_function=None, n_threads=None) -> pd.DataFrame:
+    """
+    Same as get_binned_counts but accespts a bam_dict, {'alias':[bam file, bam file], 'alias2':[bam file, ]}
+    The alias is added as the first level of the output dataframe multi-index
+
+    Returns:
+        pd.DataFrame
+    """
+    fs = 1000
+
+    aliased = False
+
+    if regions is None:
+        regions = [(c,None,None) for c in get_contig_sizes(list(bam_dict.values())[0][0]).keys()]
+
+    else:
+        for i,r in enumerate(regions):
+            if type(r)==str:
+                regions[i] = (r,None,None)
+
+            elif len(r)==3:
+
+                contig, start, end =r
+                if type(start)==int:
+                    start = max(0,start-fs)
+
+                regions[i] = (contig,start,end)
+
+
+            else:
+                contig, start, end, alias =r
+                if type(start)==int:
+                    start = max(0,start-fs)
+
+                regions[i] = (contig,start,end, alias)
+                aliased=True
+
+    #if aliased:
+    #    jobs = [(bam_path, bin_size, *region) for region, bam_path in product(regions, bams)]
+
+    jobs = []
+    for bam_group, bam_list in bam_dict.items():
+        for region in regions:
+            for bam_path in bam_list:
+                jobs.append( (bam_path, bin_size, *region, filter_function, None, bam_group) )
+            #jobs = [(bam_path, bin_size, *region, None, prefix) for region, bam_path in product(regions, bams)]
+
+
+    cut_counts = defaultdict(Counter)
+    with Pool(n_threads) as workers:
+
+        for i, (cc, contig, bam_path) in enumerate(workers.imap(_generate_count_dict_prefixed if not ta else _generate_ta_count_dict_prefixed,jobs)):
+
+            for k,v in cc.items():
+                cut_counts[k] += v
+
+            print(i,'/', len(jobs), end='\r')
+
+    return pd.DataFrame(cut_counts).T
+
+
+def get_binned_counts(bams, bin_size, regions=None, filter_function=None, n_threads=None):
+
+    fs = 1000
+    if regions is None:
+        regions = [(c,None,None) for c in get_contig_sizes(bams[0]).keys()]
+
+    else:
+        for i,r in enumerate(regions):
+            if type(r)==str:
+                regions[i] = (r,None,None)
+            else:
+                contig, start, end =r
+                if type(start)==int:
+                    start = max(0,start-fs)
+
+                regions[i] = (contig,start,end)
+
+    jobs = [(bam_path, bin_size, *region, filter_function) for region, bam_path in product(regions, bams)]
+
+
+    cut_counts = defaultdict(Counter)
+    with multiprocessing.Pool(n_threads) as workers:
+
+        for i, (cc, contig, bam_path) in enumerate(workers.imap(_generate_count_dict,jobs)):
+
+            for k,v in cc.items():
+                cut_counts[k] += v
+
+            print(i,'/', len(jobs), end='\r')
+
+    return pd.DataFrame(cut_counts).T
+
 
 def fill_range(start, end, step):
     """
@@ -82,7 +351,8 @@ def trim_rangelist(rangelist, start, end):
 
 
 def get_bins_from_bed_iter(path, contig=None):
-    with open(path) as f:
+
+    with gzip.open(path) if path.endswith('.gz') else open(path)  as f:
         for line in f:
             c, start, end = line.strip().split(None, 3)[:3]
             start, end = int(start), int(end)
@@ -356,14 +626,14 @@ def obtain_counts(commands, reference, live_update=True, show_n_cells=4, update_
     return counts
 
 
-def read_counts(read, min_mq, dedup=True, read1_only=False,ignore_mp=False, verbose=False):
+def read_counts(read, min_mq, dedup=True, read1_only=False,ignore_mp=False, ignore_qcfail=False, verbose=False):
 
     if read1_only and (not read.is_read1 or read is None):
         if verbose:
             print('NOT READ1')
         return False
 
-    if read.is_qcfail:
+    if read.is_qcfail and not ignore_qcfail:
         if verbose:
             print('QCFAIL')
         return False
@@ -395,12 +665,8 @@ def gc_correct(args):
     return np.clip(observations / np.interp(gc_vector, correction[:, 0], correction[:, 1]), 0, MAXCP)
 
 
-def gc_correct_cn_frame(df, reference, MAXCP, threads, norm_method='median'):
-    # Perform GC correction
-    chrom_sizes = dict(zip(reference.references, reference.lengths))
-    # Extract GC percentage from reference for the selected bin size:
+def genomic_bins_to_gc(reference, df):
     bins_to_gc = {}
-
     for k in df.columns:
         if len(k)==4:
             (allele, contig, start, end) = k
@@ -416,7 +682,15 @@ def gc_correct_cn_frame(df, reference, MAXCP, threads, norm_method='median'):
             else:
                 gcrat = (gc) / div
                 bins_to_gc[k] = gcrat
+    return bins_to_gc
 
+
+def gc_correct_cn_frame(df, reference, MAXCP, threads, norm_method='median'):
+    # Perform GC correction
+    chrom_sizes = dict(zip(reference.references, reference.lengths))
+    # Extract GC percentage from reference for the selected bin size:
+
+    bins_to_gc =  genomic_bins_to_gc(reference, df)
     qf = pd.DataFrame({'gc': bins_to_gc})
     qf = qf.fillna(qf['gc'].mean())
     # Join the GC table with the count matrix
@@ -492,9 +766,11 @@ def count_methylation_binned(args):
     dyad_mode =  kwargs.get('dyad_mode', False)
 
     # Stranded mode:
-    stranded =  kwargs.get('stranded', False)
+    stranded = kwargs.get('stranded', False)
 
     contexts_to_capture = kwargs.get('contexts_to_capture', None) # List
+
+    count_reads = kwargs.get('count_reads', False)
 
     reference = None
 
@@ -512,6 +788,9 @@ def count_methylation_binned(args):
     # Cant use defaultdict because of pickles :\
     met_counts = MethylationCountMatrix(threads=kwargs.get('threads', None))  # Sample->(contig,bin_start,bin_end)-> [methylated_counts, unmethylated]
 
+    if count_reads:
+        read_count_dict = defaultdict(Counter)  # location > sample > read_obs
+
     # Define which reads we want to count:
     known =  set()
     if 'known' in kwargs and kwargs['known'] is not None:
@@ -528,7 +807,6 @@ def count_methylation_binned(args):
             pass
 
     p = 0
-
     start_time = datetime.now()
     with pysam.AlignmentFile(alignments_path, threads=4) as alignments:
         # Obtain size of selected contig:
@@ -546,14 +824,28 @@ def count_methylation_binned(args):
             if p%50==0 and 'maxtime' in kwargs and kwargs['maxtime'] is not None:
                 if (datetime.now() - start_time).total_seconds() > kwargs['maxtime']:
                     print(f'Gave up on {contig}:{start}-{end}')
-
                     break
 
             if not read_counts(read, min_mq=min_mq, dedup=dedup, verbose=False):
                 continue
 
-
             tags = dict(read.tags)
+            sample = tags.get('SM', default_sample_name)
+
+            if count_reads and (read.is_read1 or not read.is_paired):
+
+                site = tags.get('DS', (read.reference_end if read.is_reverse else read.reference_start))
+                # Obtain the bin index
+                if single_location:
+                    bin_start = site
+                    bin_end = site + 1
+                else:
+                    bin_i = int(site / bin_size)
+                    bin_start = bin_size * bin_i
+                    bin_end = min(bin_size * (bin_i + 1), contig_size)
+
+                read_count_dict[(read.reference_name,bin_start, bin_end)][sample] += 1
+
             for i, (qpos, site) in enumerate(read.get_aligned_pairs(matches_only=True)):
 
                 # Don't count sites outside the selected bounds
@@ -601,8 +893,6 @@ def count_methylation_binned(args):
                         continue
 
 
-
-
                 elif call in 'Zz':
 
                     final_call = call=='Z'
@@ -616,10 +906,6 @@ def count_methylation_binned(args):
                 else:
                     continue
 
-                if read.has_tag('SM'):
-                    sample = read.get_tag('SM')
-                else:
-                    sample = default_sample_name
 
                 # Process alternative contig counts:
                 if alt_spans is not None and contig in alt_spans:
@@ -659,7 +945,8 @@ def count_methylation_binned(args):
     if reference is not None:
         reference.handle.close()
 
-    return met_counts
+    return met_counts, (read_count_dict if count_reads else None)
+
 
 
 def count_fragments_binned(args):

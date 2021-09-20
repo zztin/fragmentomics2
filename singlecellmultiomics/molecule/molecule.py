@@ -2,10 +2,10 @@ from singlecellmultiomics.utils.sequtils import hamming_distance
 import pysamiterators.iterators
 import singlecellmultiomics.bamProcessing
 from singlecellmultiomics.fragment import Fragment
-import collections
+
 import itertools
 import numpy as np
-from singlecellmultiomics.utils import style_str, phredscores_to_base_call
+from singlecellmultiomics.utils import style_str, prob_to_phred, phredscores_to_base_call, base_probabilities_to_likelihood, likelihood_to_prob
 import textwrap
 import singlecellmultiomics.alleleTools
 import functools
@@ -15,6 +15,8 @@ import pysamiterators
 from singlecellmultiomics.utils import find_ranges, create_MD_tag
 import pandas as pd
 from uuid import uuid4
+from cached_property import cached_property
+from collections import Counter, defaultdict
 
 
 ###############
@@ -42,7 +44,7 @@ def detect_alleles(molecules,
         classifier (obj) : classifier used for consensus call, when no classifier is supplied a mayority vote is used
 
     """
-    observed_alleles = collections.defaultdict(set)  # cell -> { base_call , .. }
+    observed_alleles = defaultdict(set)  # cell -> { base_call , .. }
     for molecule in molecules:
         base_call = molecule.get_consensus_base(contig, position, classifier=classifier)
 
@@ -56,7 +58,7 @@ def detect_alleles(molecules,
 def get_variant_phase(molecules, contig, position, variant_base, allele_resolver,
                       phasing_ratio_threshold=None):  # (location,base) -> [( location, base, idenfifier)]
     alleles = [variant_base]
-    phases = collections.defaultdict(collections.Counter)  # Allele_id -> variant->obs
+    phases = defaultdict(Counter)  # Allele_id -> variant->obs
     for molecule in molecules:
         # allele_obs = molecule.get_allele(return_allele_informative_base_dict=True,allele_resolver=allele_resolver)
         allele = list(molecule.get_allele(allele_resolver))
@@ -94,10 +96,16 @@ def might_be_variant(chrom, pos, variants, ref_base=None):
     """Returns True if a variant exists at the given coordinate"""
     if ref_base == 'N':
         return False
-    for record in variants.fetch(chrom, pos, pos + 1):
-        return True
+    try:
+        for record in variants.fetch(chrom, pos, pos + 1):
+            return True
+    except ValueError as e:
+        return False # Happens when the contig does not exists, return False
     return False
 
+def consensii_default_vector():
+    """a numpy vector with 5 elements initialsed as zeros"""
+    return np.zeros(5)
 
 # 1: read1 2: read2
 def molecule_to_random_primer_dict(
@@ -105,7 +113,7 @@ def molecule_to_random_primer_dict(
         primer_length=6,
         primer_read=2,
         max_N_distance=0):
-    rp = collections.defaultdict(list)
+    rp = defaultdict(list)
 
     # First add all reactions without a N in the sequence:
     for fragment in molecule:
@@ -113,7 +121,7 @@ def molecule_to_random_primer_dict(
         h_contig, hstart, hseq = fragment.get_random_primer_hash()
         if hseq is None:
             # This should really not happen with freshly demultiplexed data, it means we cannot extract the random primer sequence
-            # which should be present as a tag (rP) in the record
+            # which should be present as a tag (rS) in the record
             rp[None, None, None].append(fragment)
         elif 'N' not in hseq:
             rp[h_contig, hstart, hseq].append(fragment)
@@ -161,6 +169,16 @@ class Molecule():
             False when strand is FORWARD
             None when strand is not determined
     """
+    def get_empty_clone(self, fragments=None):
+        return type(self)(fragments,
+                          cache_size = self.cache_size,
+                          reference=self.reference,
+                          min_max_mapping_quality=self.min_max_mapping_quality,
+                          allele_assingment_method=self.allele_assingment_method,
+                          allele_resolver=self.allele_resolver,
+                          mapability_reader=self.mapability_reader,
+                          max_associated_fragments=self.max_associated_fragments,
+                          **self.kwargs)
 
     def __init__(self,
                  fragments: typing.Optional[typing.Iterable] = None,
@@ -172,6 +190,7 @@ class Molecule():
                  mapability_reader: typing.Optional[singlecellmultiomics.bamProcessing.MapabilityReader] = None,
                  allele_resolver: typing.Optional[singlecellmultiomics.alleleTools.AlleleResolver] = None,
                  max_associated_fragments=None,
+                 allele_assingment_method=1, # 0: all variants from the same allele, 1: likelihood
                  **kwargs
 
                  ):
@@ -193,7 +212,7 @@ class Molecule():
         max_associated_fragments(int) : Maximum amount of fragments associated to molecule. If more fragments are added using add_fragment() they are not added anymore to the molecule
 
         """
-
+        self.kwargs = kwargs
         self.reference = reference
         self.fragments = []
         self.spanStart = None
@@ -208,7 +227,7 @@ class Molecule():
         # to match this hash
         self.fragment_match = None
         self.min_max_mapping_quality = min_max_mapping_quality
-        self.umi_counter = collections.Counter()  # Observations of umis
+        self.umi_counter = Counter()  # Observations of umis
         self.max_associated_fragments = max_associated_fragments
         if fragments is not None:
             if isinstance(fragments, list):
@@ -219,22 +238,74 @@ class Molecule():
 
         self.allele_resolver = allele_resolver
         self.mapability_reader = mapability_reader
-        self.allele = None
+        self.allele_assingment_method = allele_assingment_method
         self.methylation_call_dict = None
         self.finalised = False
+        self.obtained_allele_likelihoods = None
+
+    @cached_property
+    def can_be_split_into_allele_molecules(self):
+        l = self.allele_likelihoods
+        if l is None or len(l)<=1:
+            return False
+        return True
+
+    def split_into_allele_molecules(self):
+        """
+        Split this molecule into multiple molecules, associated to multiple alleles
+        Returns:
+            list_of_molecules: list
+        """
+        # Perform allele based clustering
+        allele_clustered_frags = {}
+        for fragment in self:
+            n = self.get_empty_clone(fragment)
+            if n.allele not in allele_clustered_frags:
+                allele_clustered_frags[n.allele] = []
+            allele_clustered_frags[n.allele].append(n)
+
+        allele_clustered = {}
+        for allele, assigned_molecules in allele_clustered_frags.items():
+            for i, m in enumerate(assigned_molecules):
+                if i == 0:
+                    allele_clustered[allele] = m
+                else:
+                    allele_clustered[allele].add_molecule(m)
+
+        if len(allele_clustered)>1:
+            for m in allele_clustered.values():
+                m.set_meta('cr', 'SplitUponAlleleClustering')
+
+        return list(allele_clustered.values())
+
+    @cached_property
+    def allele(self):
+        if self.allele_resolver is None:
+            return None
+        if self.allele_assingment_method == 0:
+            # Obtain allele if available
+            if self.allele_resolver is not None:
+                try:
+                    hits = self.get_allele(self.allele_resolver)
+                    # Only store when we have a unique single hit:
+                    if len(hits) == 1:
+                        self.allele = list(hits)[0]
+                except ValueError as e:
+                    # This happens when a consensus can not be obtained
+                    pass
+        elif self.allele_assingment_method == 1:
+            al = Counter(self.allele_likelihoods)
+            if al is None or len(al)<1:
+                return None
+            return al.most_common(1)[0][0]
+
+        raise NotImplementedError(f'allele_assingment_method {self.allele_assingment_method} is not defined')
 
     def __finalise__(self):
         """This function is called when all associated fragments have been gathered"""
-        # Obtain allele if available
-        if self.allele_resolver is not None:
-            try:
-                hits = self.get_allele(self.allele_resolver)
-                # Only store when we have a unique single hit:
-                if len(hits) == 1:
-                    self.allele = list(hits)[0]
-            except ValueError as e:
-                # This happens when a consensus can not be obtained
-                pass
+
+        # Perfom allele assignment based on likelihood:
+        # this is now only generated upon demand, see .allele method
 
         if self.mapability_reader is not None:
             self.update_mapability()
@@ -260,8 +331,10 @@ class Molecule():
         try:
             mapable = self.mapability_reader.site_is_mapable(
                 *self.get_cut_site())
-        except Exception as e:
+        except TypeError:
             pass
+        except Exception as e:
+            raise
 
         if mapable is False:
             self.set_meta('mp', 'bad')
@@ -424,12 +497,12 @@ class Molecule():
         Obtain a dictionary with tag -> value -> frequency
 
         Returns:
-            tag_obs (collections.defaultdict(collections.Counter)):
+            tag_obs (defaultdict(Counter)):
                 { tag(str) : { value(int/str): frequency:(int) }
 
 
         """
-        tags_obs = collections.defaultdict(collections.Counter)
+        tags_obs = defaultdict(Counter)
         for tag, value in itertools.chain(
                 *[r.tags for r in self.iter_reads()]):
             try:
@@ -451,6 +524,7 @@ class Molecule():
             - TR : Total RT reactions
             - ap : phasing information (if allele_resolver is set)
             - TF : total fragments
+            - ms : size of the molecule (largest fragment)
         """
         self.is_valid(set_rejection_reasons=True)
         if self.umi is not None:
@@ -460,7 +534,11 @@ class Molecule():
 
         # Set total amount of associated fragments
         self.set_meta('TF', len(self.fragments) + self.overflow_fragments)
-
+        try:
+            self.set_meta('ms',self.aligned_length)
+        except Exception as e:
+            # There is no properly defined aligned length
+            pass
         # associatedFragmentCount :
         self.set_meta('af', len(self))
         for rc, frag in enumerate(self):
@@ -472,12 +550,15 @@ class Molecule():
                         read.is_duplicate = True
 
         # Write RT reaction tags (rt: rt reaction index, rd rt duplicate index)
+        # This is only required for fragments which have defined random primers
         rt_reaction_index = None
-        for rt_reaction_index, (_, frags) in enumerate(
+        for rt_reaction_index, ( (contig, random_primer_start, random_primer_sequence), frags) in enumerate(
                 self.get_rt_reactions().items()):
+
             for rt_duplicate_index, frag in enumerate(frags):
                 frag.set_meta('rt', rt_reaction_index)
                 frag.set_meta('rd', rt_duplicate_index)
+                frag.set_meta('rp', random_primer_start)
         self.set_meta('TR', 0 if (rt_reaction_index is None) else rt_reaction_index + 1)
 
         if self.allele_resolver is not None:
@@ -680,18 +761,28 @@ class Molecule():
                            )).astype('B')
         return predicted_sequence, phred_scores
 
-    def deduplicate_majority(self, target_bam, read_name, max_N_span=None):
+    def get_base_confidence_dict(self):
+        """
+        Get dictionary containing base calls per position and the corresponding confidences
 
+        Returns:
+            obs (dict) :  (contig (str), position  (int) ) : base (str) : prob correct (list)
+        """
         # Convert (contig, position) -> (base_call) into:
         # (contig, position) -> (base_call, confidence)
-
-        obs = collections.defaultdict(lambda: collections.defaultdict(list))
+        obs = defaultdict(lambda: defaultdict(list))
         for read in self.iter_reads():
             for qpos, rpos in read.get_aligned_pairs(matches_only=True):
                 qbase = read.seq[qpos]
                 qqual = read.query_qualities[qpos]
                 # @ todo reads which span multiple chromosomes
                 obs[(self.chromosome, rpos)][qbase].append(1 - np.power(10, -qqual / 10))
+        return obs
+
+
+    def deduplicate_majority(self, target_bam, read_name, max_N_span=None):
+
+        obs = self.get_base_confidence_dict()
 
         reads = list(self.get_dedup_reads(read_name,
                                      target_bam,
@@ -1290,9 +1381,9 @@ class Molecule():
         """Obtain the frequency of bases in the molecule consensus sequence
 
         Returns:
-            base_frequencies (collections.Counter) : Counter containing base frequecies, for example: { 'A':10,'T':3, C:4 }
+            base_frequencies (Counter) : Counter containing base frequecies, for example: { 'A':10,'T':3, C:4 }
         """
-        return collections.Counter(
+        return Counter(
             self.get_consensus(
                 allow_N=allow_N).values())
 
@@ -1518,6 +1609,13 @@ class Molecule():
         """
         return max([fragment.mapping_quality for fragment in self])
 
+    def get_min_mapping_qual(self) -> float:
+        """Get min mapping quality of the molecule
+        Returns:
+            min_mapping_qual (float)
+        """
+        return min([fragment.mapping_quality for fragment in self])
+
     def contains_valid_fragment(self):
         """Check if an associated fragment exists which returns True for is_valid()
 
@@ -1539,6 +1637,38 @@ class Molecule():
                 return False
         return True
 
+    def add_molecule(self, other):
+        """
+        Merge other molecule into this molecule.
+        Merges by assigning all fragments in other to this molecule.
+        """
+        for fragment in other:
+            self._add_fragment(fragment)
+
+
+    def get_span_sequence(self, reference=None):
+        """Obtain the sequence between the start and end of the molecule
+        Args:
+            reference(pysam.FastaFile) : reference  to use.
+                If not specified `self.reference` is used
+        Returns:
+            sequence (str)
+        """
+        if self.chromosome is None:
+            return ''
+
+        if reference is None:
+            if self.reference is None:
+                raise ValueError('Please supply a reference (PySAM.FastaFile)')
+            reference = self.reference
+        return reference.fetch(
+            self.chromosome,
+            self.spanStart,
+            self.spanEnd).upper()
+
+    def get_fragment_span_sequence(self, reference=None):
+        return self.get_span_sequence(reference)
+
     def _add_fragment(self, fragment):
 
         # Do not process the fragment when the max_associated_fragments threshold is exceeded
@@ -1556,11 +1686,19 @@ class Molecule():
 
         # Update span:
         add_span = fragment.get_span()
+
+        # It is possible that the span is not defined, then set the respective keys to None
+        # This indicates the molecule is qcfail
+
+        #if not self.has_valid_span():
+        #    self.spanStart, self.spanEnd, self.chromosome = None,None, None
+        #else:
         self.spanStart = add_span[1] if self.spanStart is None else min(
             add_span[1], self.spanStart)
         self.spanEnd = add_span[2] if self.spanEnd is None else max(
             add_span[2], self.spanEnd)
         self.chromosome = add_span[0]
+
         self.span = (self.chromosome, self.spanStart, self.spanEnd)
         if fragment.strand is not None:
             self.strand = fragment.strand
@@ -1569,6 +1707,48 @@ class Molecule():
         self.saved_base_obs = None
         self.update_umi()
         return True
+
+    @property
+    def aligned_length(self) -> int:
+        if self.has_valid_span():
+            return self.spanEnd - self.spanStart
+        else:
+            return None
+
+    @property
+    def is_completely_matching(self) -> bool:
+        """
+        Checks if all associated reads are completely mapped:
+        checks if all cigar operations are M,
+        Returns True when all cigar operations are M, False otherwise
+        """
+
+        return all(
+                (
+                     all(
+                     [ (operation==0)
+                        for operation, amount in read.cigartuples] )
+                for read in self.iter_reads()))
+
+
+    @property
+    def estimated_max_length(self) -> int:
+        """
+        Obtain the estimated size of the fragment,
+        returns None when estimation is not possible
+        Takes into account removed bases (R2)
+        Assumes inwards sequencing orientation
+        """
+        max_size = None
+        for frag in self:
+            r = frag.estimated_length
+            if r is None :
+                continue
+            if max_size is None:
+                max_size = r
+            elif r>max_size:
+                max_size = r
+        return max_size
 
     def get_safely_aligned_length(self):
         """Get the amount of safely aligned bases (excludes primers)
@@ -1583,6 +1763,9 @@ class Molecule():
         end = None
         contig = None
         for fragment in self:
+            if not fragment.safe_span:
+                continue
+
             if contig is None:
                 contig = fragment.span[0]
             if contig == fragment.span[0]:
@@ -1594,6 +1777,8 @@ class Molecule():
                     start = min(f_start, start)
                     end = min(f_end, end)
 
+        if end is None:
+            raise ValueError('Not safe')
         return abs(end - start)
 
     def add_fragment(self, fragment, use_hash=True):
@@ -1651,7 +1836,7 @@ class Molecule():
                        self.cache_size *
                        0.5)
 
-    def get_rt_reactions(self):
+    def get_rt_reactions(self) -> dict:
         """Obtain RT reaction dictionary
 
         returns:
@@ -1698,17 +1883,24 @@ class Molecule():
             self.get_rt_reaction_fragment_sizes()
         )
 
-    def write_pysam(self, target_file, consensus=False, no_source_reads=False, consensus_name=None):
+    def write_pysam(self, target_file, consensus=False, no_source_reads=False, consensus_name=None, consensus_read_callback=None, consensus_read_callback_kwargs=None):
         """Write all associated reads to the target file
 
         Args:
             target_file (pysam.AlignmentFile) : Target file
             consensus (bool) : write consensus
             no_source_reads (bool) : while in consensus mode, don't write original reads
+            consensus_read_callback (function) : this function is called with every consensus read as an arguments
+            consensus_read_callback_kwargs (dict) : arguments to pass to the callback function
         """
         if consensus:
             reads = self.deduplicate_majority(target_file,
                                               f'molecule_{uuid4()}' if consensus_name is None else consensus_name)
+            if consensus_read_callback is not None:
+                if consensus_read_callback_kwargs is not None:
+                    consensus_read_callback(reads, **consensus_read_callback_kwargs)
+                else:
+                    consensus_read_callback(reads)
 
             for read in reads:
                 target_file.write(read)
@@ -1743,7 +1935,7 @@ class Molecule():
 
         Args:
             call_dict (dict) : Dictionary containing bismark calls (chrom,pos) :
-                        {'context':letter,'reference_base': letter   , 'consensus': letter }
+                        {'context':letter,'reference_base': letter   , 'consensus': letter, optiona: 'qual': pred_score (int) }
 
             bismark_call_tag (str) : tag to write bismark call string
 
@@ -1758,7 +1950,7 @@ class Molecule():
         self.methylation_call_dict = call_dict
 
         # molecule_XM dictionary containing count of contexts
-        molecule_XM = collections.Counter(
+        molecule_XM = Counter(
             list(
                 d.get(
                     'context',
@@ -1823,26 +2015,29 @@ class Molecule():
 
             # Set XR (Read conversion string)
             # @todo: this is TAPS specific, inneficient, ugly
+            try:
+                fwd = 0
+                rev = 0
+                for (qpos, rpos, ref_base), call in zip(
+                    read.get_aligned_pairs(matches_only=True,with_seq=True),
+                    bis_met_call_string):
+                    qbase = read.query_sequence[qpos]
+                    if call.isupper():
+                        if qbase=='A':
+                            rev+=1
+                        elif qbase=='T':
+                            fwd+=1
 
-            fwd = 0
-            rev = 0
-            for (qpos, rpos, ref_base), call in zip(
-                read.get_aligned_pairs(matches_only=True,with_seq=True),
-                bis_met_call_string):
-                qbase = read.query_sequence[qpos]
-                if call.isupper():
-                    if qbase=='A':
-                        rev+=1
-                    elif qbase=='T':
-                        fwd+=1
-
-            # Set XG (genome conversion string)
-            if rev>fwd:
-                read.set_tag('XR','CT')
-                read.set_tag('XG','GA')
-            else:
-                read.set_tag('XR','CT')
-                read.set_tag('XG','CT')
+                # Set XG (genome conversion string)
+                if rev>fwd:
+                    read.set_tag('XR','CT')
+                    read.set_tag('XG','GA')
+                else:
+                    read.set_tag('XR','CT')
+                    read.set_tag('XG','CT')
+            except ValueError:
+                # Dont set the tag
+                pass
 
     def set_meta(self, tag, value):
         """Set meta information to all fragments
@@ -1915,16 +2110,18 @@ class Molecule():
             'inserts_per_bp': inserts_per_bp,
             'deletions_per_bp': deletions_per_bp,
             'matches_per_bp': matches_per_bp,
-            'alt_per_read': alt_per_read
+            'alt_per_read': alt_per_read,
+            'total_bases':totalbases,
+            'total_reads':total_reads,
         }
 
-    def get_mean_base_quality(
+    def get_mean_cycle(
             self,
             chromosome,
             position,
             base=None,
             not_base=None):
-        """Get the mean phred score at the supplied coordinate and base-call
+        """Get the mean cycle at the supplied coordinate and base-call
 
         Args:
             chromosome (str)
@@ -1933,18 +2130,20 @@ class Molecule():
             not_base(str) : select only reads without this base
 
         Returns:
-            mean_phred_score (float)
+            mean_cycles (tuple): mean cycle for R1 and R2
         """
         assert (base is not None or not_base is not None), "Supply base or not_base"
 
-        qualities = []
+        cycles_R1 = []
+        cycles_R2 = []
         for read in self.iter_reads():
 
             if read is None or read.reference_name != chromosome:
                 continue
 
-            for query_pos, ref_pos in read.get_aligned_pairs(
-                    with_seq=False, matches_only=True):
+
+            for cycle, query_pos, ref_pos in pysamiterators.iterators.ReadCycleIterator(
+                    read, with_seq=False):
 
                 if query_pos is None or ref_pos != position:
                     continue
@@ -1954,11 +2153,221 @@ class Molecule():
                 if base is not None and read.seq[query_pos] != base:
                     continue
 
-                qualities.append(ord(read.qual[query_pos]))
-        if len(qualities) == 0:
+                if read.is_read2:
+                    cycles_R2.append(cycle)
+                else:
+                    cycles_R1.append(cycle)
+        if len(cycles_R2) == 0 and len(cycles_R1)==0:
             raise IndexError(
                 "There are no observations if the supplied base/location combination")
-        return np.mean(qualities)
+        return (np.mean(cycles_R1) if len(cycles_R1) else np.nan),  (np.mean(cycles_R2) if len(cycles_R2) else np.nan)
+
+    def get_mean_base_quality(
+                self,
+                chromosome,
+                position,
+                base=None,
+                not_base=None):
+            """Get the mean phred score at the supplied coordinate and base-call
+
+            Args:
+                chromosome (str)
+                position (int)
+                base (str) : select only reads with this base
+                not_base(str) : select only reads without this base
+
+            Returns:
+                mean_phred_score (float)
+            """
+            assert (base is not None or not_base is not None), "Supply base or not_base"
+
+            qualities = []
+            for read in self.iter_reads():
+
+                if read is None or read.reference_name != chromosome:
+                    continue
+
+                for query_pos, ref_pos in read.get_aligned_pairs(
+                        with_seq=False, matches_only=True):
+
+                    if query_pos is None or ref_pos != position:
+                        continue
+
+                    if not_base is not None and read.seq[query_pos] == not_base:
+                        continue
+                    if base is not None and read.seq[query_pos] != base:
+                        continue
+
+                    qualities.append(ord(read.qual[query_pos]))
+            if len(qualities) == 0:
+                raise IndexError(
+                    "There are no observations if the supplied base/location combination")
+            return np.mean(qualities)
+
+    @cached_property
+    def allele_likelihoods(self):
+        """
+        Per allele likelihood
+
+        Returns:
+            likelihoods (dict) : {allele_name : likelihood}
+
+        """
+        return self.get_allele_likelihoods()[0]
+
+    @property
+    def library(self):
+        """
+        Associated library
+
+        Returns:
+           library (str) : Library associated with the first read of this molecule
+
+        """
+        for read in self.iter_reads():
+            if read.has_tag('LY'):
+                return read.get_tag('LY')
+
+    @cached_property
+    def allele_probabilities(self):
+        """
+        Per allele probability
+
+        Returns:
+            likelihoods (dict) : {allele_name : prob}
+
+        """
+        return likelihood_to_prob( self.get_allele_likelihoods()[0] )
+
+
+    @cached_property
+    def allele_confidence(self) -> int:
+        """
+        Returns
+            confidence(int) : a phred scalled confidence value for the allele
+            assignment, returns zero when no allele is associated to the molecule
+        """
+        l = self.allele_probabilities
+        if l is None or len(l) == 0 :
+            return 0
+        return int(prob_to_phred( Counter(l).most_common(1)[0][1] ))
+
+    @cached_property
+    def base_confidences(self):
+        return self.get_base_confidence_dict()
+
+    @cached_property
+    def base_likelihoods(self):
+        return {(chrom, pos):base_probabilities_to_likelihood(probs) for (chrom, pos),probs in self.base_confidences.items()}
+
+    @cached_property
+    def base_probabilities(self):
+        # Optimization which is equal to {location:likelihood_to_prob(liks) for location,liks in self.base_likelihoods.items()}
+        obs = {}
+        for read in self.iter_reads():
+            for qpos, rpos in read.get_aligned_pairs(matches_only=True):
+                qbase = read.seq[qpos]
+                qqual = read.query_qualities[qpos]
+                if qbase=='N':
+                    continue
+                # @ todo reads which span multiple chromosomes
+                k = (self.chromosome, rpos)
+                p = 1 - np.power(10, -qqual / 10)
+
+                if not k in obs:
+                    obs[k] = {}
+                if not qbase in obs[k]:
+                    obs[k][qbase] = [p,1] # likelihood, n
+                    obs[k]['N'] = [1-p,1] # likelihood, n
+                else:
+                    obs[k][qbase][0] *= p
+                    obs[k][qbase][1] += 1
+
+                    obs[k]['N'][0] *= 1-p # likelihood, n
+                    obs[k]['N'][1] += 1 # likelihood, n
+        # Perform likelihood conversion and convert to probs
+        return { location: likelihood_to_prob({
+            base:likelihood/np.power(0.25,n-1)
+                    for base,(likelihood,n) in base_likelihoods.items() })
+                    for location,base_likelihoods in obs.items()}
+
+    ## This is a duplicate of the above but only calculates for allele informative positions
+    @cached_property
+    def allele_informative_base_probabilities(self):
+        # Optimization which is equal to {location:likelihood_to_prob(liks) for location,liks in self.base_likelihoods.items()}
+        obs = {}
+        for read in self.iter_reads():
+            for qpos, rpos in read.get_aligned_pairs(matches_only=True):
+                if not self.allele_resolver.has_location( read.reference_name, rpos ):
+                    continue
+                qbase = read.seq[qpos]
+                qqual = read.query_qualities[qpos]
+                if qbase=='N':
+                    continue
+                # @ todo reads which span multiple chromosomes
+                k = (self.chromosome, rpos)
+                p = 1 - np.power(10, -qqual / 10)
+
+                if not k in obs:
+                    obs[k] = {}
+                if not qbase in obs[k]:
+                    obs[k][qbase] = [p,1] # likelihood, n
+                    obs[k]['N'] = [1-p,1] # likelihood, n
+                else:
+                    obs[k][qbase][0] *= p
+                    obs[k][qbase][1] += 1
+
+                    obs[k]['N'][0] *= 1-p # likelihood, n
+                    obs[k]['N'][1] += 1 # likelihood, n
+        # Perform likelihood conversion and convert to probs
+        return { location: likelihood_to_prob({
+            base:likelihood/np.power(0.25,n-1)
+                    for base,(likelihood,n) in base_likelihoods.items() })
+                    for location,base_likelihoods in obs.items()}
+
+
+
+    def calculate_allele_likelihoods(self):
+        self.aibd = defaultdict(list)
+        self.obtained_allele_likelihoods = Counter()  # Allele -> [prob, prob, prob]
+
+        for (chrom, pos), base_probs in self.allele_informative_base_probabilities.items():
+
+            for base, p in base_probs.items():
+                if base == 'N':
+                    continue
+
+                assoc_alleles = self.allele_resolver.getAllelesAt(chrom, pos, base)
+                if assoc_alleles is not None and len(assoc_alleles) == 1:
+                    allele = list(assoc_alleles)[0]
+                    self.obtained_allele_likelihoods[allele] += p
+
+                    self.aibd[allele].append((chrom, pos, base, p))
+
+
+
+    def get_allele_likelihoods(self,):
+        """Obtain the allele(s) this molecule maps to
+
+        Args:
+            allele_resolver(singlecellmultiomics.alleleTools.AlleleResolver)  : resolver used
+            return_allele_informative_base_dict(bool) : return dictionary containing the bases used for allele determination
+            defaultdict(list,
+            {'allele1': [
+              ('chr18', 410937, 'T'),
+              ('chr18', 410943, 'G'),
+              ('chr18', 410996, 'G'),
+              ('chr18', 411068, 'A')]})
+
+        Returns:
+            { 'allele_a': likelihood, 'allele_b':likelihood }
+        """
+        if self.obtained_allele_likelihoods is None:
+            self.calculate_allele_likelihoods()
+
+        return self.obtained_allele_likelihoods, self.aibd
+
+
 
     def get_allele(
             self,
@@ -1988,7 +2397,7 @@ class Molecule():
 
         alleles = set()
         if return_allele_informative_base_dict:
-            aibd = collections.defaultdict(list)
+            aibd = defaultdict(list)
         try:
             for (chrom, pos), base in self.get_consensus(
                     base_obs=self.get_base_observation_dict_NOREF()).items():
@@ -2020,25 +2429,49 @@ class Molecule():
         if reads is None:
             reads = self.iter_reads()
 
-        haplotype = self.get_allele(
-            return_allele_informative_base_dict=True,
-            allele_resolver=allele_resolver)
+        use_likelihood = (self.allele_assingment_method==1)
 
-        phased_locations = [
-            (allele, chromosome, position, base)
-            for allele, bps in haplotype.items()
-            for chromosome, position, base in bps]
+        if not use_likelihood:
+            haplotype = self.get_allele(
+                return_allele_informative_base_dict=True,
+                allele_resolver=allele_resolver)
 
-        phase_str = '|'.join(
-            [
-                f'{chromosome},{position},{base},{allele}' for allele,
-                                                               chromosome,
-                                                               position,
-                                                               base in phased_locations])
+            phased_locations = [
+                (allele, chromosome, position, base)
+                for allele, bps in haplotype.items()
+                for chromosome, position, base in bps]
+
+            phase_str = '|'.join(
+                [
+                    f'{chromosome},{position},{base},{allele}' for allele,
+                                                                   chromosome,
+                                                                   position,
+                                                                   base in phased_locations])
+        else:
+
+            allele_likelihoods, aibd = self.get_allele_likelihoods()
+            allele_likelihoods = likelihood_to_prob(allele_likelihoods)
+
+            phased_locations = [
+                (allele, chromosome, position, base, confidence)
+                for allele, bps in aibd.items()
+                for chromosome, position, base, confidence in bps]
+
+            phase_str = '|'.join(
+                [
+                    f'{chromosome},{position},{base},{allele},{ prob_to_phred(confidence) }' for allele,
+                                                                   chromosome,
+                                                                   position,
+                                                                   base,
+                                                                   confidence in phased_locations])
+
+
 
         if len(phase_str) > 0:
             for read in reads:
                 read.set_tag(tag, phase_str)
+                if use_likelihood:
+                    read.set_tag('al', self.allele_confidence)
 
     def get_base_observation_dict_NOREF(self, allow_N=False):
         '''
@@ -2054,7 +2487,7 @@ class Molecule():
             { genome_location (tuple) : base (string) if return_refbases is True }
         '''
 
-        base_obs = collections.defaultdict(collections.Counter)
+        base_obs = defaultdict(Counter)
 
         used = 0  # some alignments yielded valid calls
         ignored = 0
@@ -2079,7 +2512,9 @@ class Molecule():
 
         return base_obs
 
-    def get_base_observation_dict(self, return_refbases=False, allow_N=False, allow_unsafe=True):
+    def get_base_observation_dict(self, return_refbases=False, allow_N=False,
+        allow_unsafe=True, one_call_per_frag=False, min_cycle_r1=None,
+         max_cycle_r1=None, min_cycle_r2=None, max_cycle_r2=None, use_cache=True, min_bq=None):
         '''
         Obtain observed bases at reference aligned locations
 
@@ -2088,6 +2523,15 @@ class Molecule():
                 return both observed bases and reference bases
             allow_N (bool): Keep N base calls in observations
 
+            min_cycle_r1(int) : Exclude read 1 base calls with a cycle smaller than this value (excludes bases which are trimmed before mapping)
+
+            max_cycle_r1(int) : Exclude read 1 base calls with a cycle larger than this value (excludes bases which are trimmed before mapping)
+
+            min_cycle_r2(int) : Exclude read 2 base calls with a cycle smaller than this value (excludes bases which are trimmed before mapping)
+
+            max_cycle_r2(int) : Exclude read 2 base calls with a cycle larger than this value (excludes bases which are trimmed before mapping)
+
+
         Returns:
             { genome_location (tuple) : base (string) : obs (int) }
             and
@@ -2095,14 +2539,15 @@ class Molecule():
         '''
 
         # Check if cached is available
-        if self.saved_base_obs is not None:
-            if not return_refbases:
-                return self.saved_base_obs[0]
-            else:
-                if self.saved_base_obs[1] is not None:
-                    return self.saved_base_obs
+        if use_cache:
+            if self.saved_base_obs is not None :
+                if not return_refbases:
+                    return self.saved_base_obs[0]
+                else:
+                    if self.saved_base_obs[1] is not None:
+                        return self.saved_base_obs
 
-        base_obs = collections.defaultdict(collections.Counter)
+        base_obs = defaultdict(Counter)
 
         ref_bases = {}
         used = 0  # some alignments yielded valid calls
@@ -2112,6 +2557,10 @@ class Molecule():
             _, start, end = fragment.span
 
             used += 1
+
+            if one_call_per_frag:
+                frag_location_obs = set()
+
             for read in fragment:
                 if read is None:
                     continue
@@ -2120,15 +2569,28 @@ class Molecule():
                     for query_pos, ref_pos, ref_base in read.get_aligned_pairs(matches_only=True, with_seq=True):
                         if query_pos is None or ref_pos is None:  # or ref_pos < start or ref_pos > end:
                             continue
+
                         query_base = read.seq[query_pos]
                         # query_qual = read.qual[query_pos]
+                        if min_bq is not None and read.query_qualities[query_pos]<min_bq:
+                            continue
+
                         if query_base == 'N':
                             continue
-                        base_obs[(read.reference_name, ref_pos)][query_base] += 1
+
+                        k = (read.reference_name, ref_pos)
+
+                        if one_call_per_frag:
+                            if k in frag_location_obs:
+                                continue
+                            frag_location_obs.add(k)
+
+                        base_obs[k][query_base] += 1
 
                         if return_refbases:
                             ref_bases[(read.reference_name, ref_pos)
                             ] = ref_base.upper()
+
 
                 else:
                     for cycle, query_pos, ref_pos, ref_base in pysamiterators.iterators.ReadCycleIterator(
@@ -2136,10 +2598,32 @@ class Molecule():
 
                         if query_pos is None or ref_pos is None:  # or ref_pos < start or ref_pos > end:
                             continue
+
+                        # Verify cycle filters:
+                        if (not read.is_paired or read.is_read1) and (
+                                ( min_cycle_r1 is not None and cycle <  min_cycle_r1 ) or
+                                ( max_cycle_r1 is not None and  cycle >  max_cycle_r1 )):
+                            continue
+
+                        if (read.is_paired and read.is_read2) and (
+                                ( min_cycle_r2 is not None and cycle <  min_cycle_r2 ) or
+                                ( max_cycle_r2 is not None and cycle >  max_cycle_r2 )):
+                            continue
+
                         query_base = read.seq[query_pos]
-                        # query_qual = read.qual[query_pos]
+                        # Skip bases with low bq:
+                        if min_bq is not None and read.query_qualities[query_pos]<min_bq:
+                            continue
+
                         if query_base == 'N':
                             continue
+
+                        k = (read.reference_name, ref_pos)
+                        if one_call_per_frag:
+                            if k in frag_location_obs:
+                                continue
+                            frag_location_obs.add(k)
+
                         base_obs[(read.reference_name, ref_pos)][query_base] += 1
 
                         if return_refbases:
@@ -2186,7 +2670,68 @@ class Molecule():
 
         return matches, mismatches
 
-    def get_consensus(
+    def get_consensus(self,
+                    dove_safe: bool = False,
+                    only_include_refbase: str = None,
+                    allow_N=False,
+                    with_probs_and_obs=False, **get_consensus_dictionaries_kwargs):
+        """
+        Obtain consensus base-calls for the molecule
+        """
+
+        if allow_N:
+            raise NotImplementedError()
+
+        consensii = defaultdict(consensii_default_vector)  # location -> obs (A,C,G,T,N)
+        if with_probs_and_obs:
+            phred_scores = defaultdict(lambda:defaultdict(list))
+        for fragment in self:
+            if dove_safe and not fragment.has_R2() or not fragment.has_R1():
+                continue
+
+            try:
+                for position, (q_base, phred_score) in fragment.get_consensus(
+                        dove_safe=dove_safe,only_include_refbase=only_include_refbase,
+                        **get_consensus_dictionaries_kwargs).items():
+
+                    if q_base == 'N':
+                        continue
+                    #    consensii[position][4] += phred_score
+                    # else:
+                    if with_probs_and_obs:
+                        phred_scores[position][q_base].append(phred_score)
+
+                    consensii[position]['ACGTN'.index(q_base)] += 1
+            except ValueError as e:
+                # For example: ValueError('This method only works for inwards facing reads')
+                pass
+        if len(consensii)==0:
+            if with_probs_and_obs:
+                return dict(),None,None
+            else:
+                return dict()
+
+        locations = np.empty(len(consensii), dtype=object)
+        locations[:] = sorted(list(consensii.keys()))
+
+        v = np.vstack([ consensii[location] for location in locations])
+        majority_base_indices = np.argmax(v, axis=1)
+
+        # Check if there is ties, this result in multiple hits for argmax (majority_base_indices),
+        # such a situtation is of course terrible and should be dropped
+        proper = (v == v[np.arange(v.shape[0]), majority_base_indices][:, np.newaxis]).sum(1) == 1
+
+        if with_probs_and_obs:
+            return (
+                dict(zip(locations[proper], ['ACGTN'[idx] for idx in majority_base_indices[proper]])),
+                phred_scores,
+                consensii
+            )
+        else:
+            return  dict(zip(locations[proper], ['ACGTN'[idx] for idx in majority_base_indices[proper]]))
+
+
+    def get_consensus_old(
             self,
             base_obs=None,
             classifier=None,
@@ -2198,7 +2743,7 @@ class Molecule():
         By default mayority voting is used to determine the consensus base. If a classifier is supplied the classifier is used to determine the consensus base.
 
         Args:
-            base_obs (collections.defaultdict(collections.Counter)) :
+            base_obs (defaultdict(Counter)) :
                 { genome_location (tuple) : base (string) : obs (int) }
 
             classifier : fitted classifier to use for consensus calling. When no classifier is provided the consensus is determined by majority voting
@@ -2290,7 +2835,7 @@ class Molecule():
             variants (pysam.VariantFile) : Variant file handle to extract variants from
 
         Returns:
-            dict (collections.defaultdict( collections.Counter )) : { (chrom,pos) : ( call (str) ): observations  (int) }
+            dict (defaultdict( Counter )) : { (chrom,pos) : ( call (str) ): observations  (int) }
         """
         variant_dict = {}
         for variant in variants.fetch(
@@ -2300,7 +2845,7 @@ class Molecule():
             variant_dict[(variant.chrom, variant.pos - 1)
             ] = (variant.ref, variant.alts)
 
-        variant_calls = collections.defaultdict(collections.Counter)
+        variant_calls = defaultdict(Counter)
         for fragment in self:
 
             _, start, end = fragment.span
@@ -2362,6 +2907,10 @@ class Molecule():
         for fragment in self.fragments:
             yield fragment
 
+    @property
+    def span_len(self):
+        return abs(self.spanEnd - self.spanStart)
+
     def get_methylated_count(self, context=3):
         """Get the total amount of methylated bases
 
@@ -2369,10 +2918,10 @@ class Molecule():
             context (int) : 3 or 4 base context
 
         Returns:
-            r (collections.Counter) : sum of methylated bases in contexts
+            r (Counter) : sum of methylated bases in contexts
         """
 
-        r = collections.Counter()
+        r = Counter()
 
     def get_html(
             self,
@@ -2456,7 +3005,7 @@ class Molecule():
         """Obtain methylation dictionary
 
         Returns:
-            methylated_positions (collections.Counter):
+            methylated_positions (Counter):
                 (read.reference_name, rpos) : times seen methylated
 
             methylated_state (dict):
@@ -2466,7 +3015,7 @@ class Molecule():
                 -1 for unknown
 
         """
-        methylated_positions = collections.Counter()  # chrom-pos->count
+        methylated_positions = Counter()  # chrom-pos->count
         methylated_state = dict()  # chrom-pos->1, 0, -1
         for fragment in self:
             for read in fragment:
@@ -2503,3 +3052,18 @@ class Molecule():
                                     read.reference_name, rpos)] = -1
                     i += 1
         return methylated_positions, methylated_state
+
+
+    def _get_allele_from_reads(self) -> str:
+        """
+        Obtain associated allele based on the associated reads of the molecule
+
+        """
+        allele = None
+        for frag in self:
+            for read in frag:
+                if read is None or not read.has_tag('DA'):
+                    continue
+                allele = read.get_tag('DA')
+                return allele
+        return None

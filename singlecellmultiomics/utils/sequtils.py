@@ -5,6 +5,8 @@ from collections import Counter
 import numpy as np
 from pysamiterators import CachedFasta
 from array import array
+import os
+
 
 class Reference(Prefetcher):
     """ This is a picklable wrapper to pass reference handles """
@@ -24,9 +26,91 @@ class Reference(Prefetcher):
         return FastaFile(**self.args)
 
 
+def invert_strand_f(s):
+    if s=='+':
+        return '-'
+    elif s=='-':
+        return '+'
+    return '.'
+            
+def get_contig_lengths_from_resource(resource ) -> dict:
+    """
+    Extract contig lengts from the supplied resouce (Fasta file or Bam/Cram/Sam )
+    Returns:
+        lengths(dict)
+    """
+    if type(resource) is AlignmentFile:
+        return dict(zip(resource.references, resource.lengths))
+
+    elif type(resource) is str:
+        est_type = get_file_type(resource)
+
+        if est_type in (AlignmentFile,FastaFile):
+            with est_type(resource) as f:
+                lens = dict(zip(f.references, f.lengths))
+
+            return lens
 
 
-def is_main_chromosome(chrom):
+    raise NotImplementedError('Unable to extract contig lengths from this resource')
+
+
+def get_file_type(s: str):
+    """Guess the file type of the input string, returns None when the file type can not be determined"""
+    if s.endswith('.bam') or s.endswith('.cram') or s.endswith('.sam'):
+        return AlignmentFile
+    if s.endswith('.fa') or s.endswith('.fasta') or s.endswith('.fa.gz') or s.endswith('.fasta.gz'):
+        return FastaFile
+
+    return None
+
+def create_fasta_dict_file(refpath: str, skip_if_exists=True):
+    """Create index dict file for the reference fasta at refpath
+
+    Args:
+        refpath : path to fasta file
+
+        skip_if_exists : do not generate the index if it exists
+
+    Returns:
+        dpath (str) : path to the dict index file
+    """
+    dpath = refpath.replace('.fa','').replace('.fasta','')+'.dict'
+    if os.path.exists(dpath):
+        return dpath
+
+    with FastaFile(refpath) as reference, open(dpath,'w') as o:
+        for ref, l in zip(reference.references, reference.lengths ):
+            o.write(f'{ref}\t{l}\n')
+    return dpath
+
+
+def get_chromosome_number(chrom: str) -> int:
+    """
+    Get chromosome number (index) of the supplied chromosome:
+        '1' -> 1, chr1 -> 1, returns -1 when not available, chrM -> -1
+    """
+    try:
+        return int(chrom.replace('chr',''))
+    except Exception as e:
+        return -1
+
+def is_autosome(chrom: str) -> bool:
+    """ Returns True when the chromsome is an autosomal chromsome,
+    not an alternative allele, mitochrondrial or sex chromosome
+
+    Args:
+        chrom(str) : chromosome name
+
+    Returns:
+        is_main(bool) : True when the chromsome is an autosome
+
+    """
+    return is_main_chromosome(chrom) and get_chromosome_number(chrom)!=-1
+
+
+
+def is_main_chromosome(chrom: str) -> bool:
     """ Returns True when the chromsome is a main chromsome,
     not an alternative or other
 
@@ -42,7 +126,7 @@ def is_main_chromosome(chrom):
         return False
     return True
 
-def get_contig_list_from_fasta(fasta_path, with_length=False):
+def get_contig_list_from_fasta(fasta_path: str, with_length: bool=False) -> list:
     """Obtain list of contigs froma  fasta file,
         all alternative contigs are pooled into the string MISC_ALT_CONTIGS_SCMO
 
@@ -202,6 +286,14 @@ def get_context(contig: str, position: int, reference: FastaFile, ibase: str = N
     else:
         return reference.fetch(contig, position-k_rad, position+k_rad+1).upper()
 
+def base_probabilities_to_likelihood(probs: dict):
+    probs['N'] = [1-p  for base, ps in probs.items() for p in ps if base != 'N' ]
+    return {base:np.product(v)/np.power(0.25, len(v)-1) for base,v in probs.items() }
+
+def likelihood_to_prob(likelihoods):
+    total_likelihood = sum(likelihoods.values())
+    return {key: value / total_likelihood
+    for key, value in likelihoods.items()}
 
 
 def phredscores_to_base_call(probs: dict):
@@ -220,8 +312,7 @@ def phredscores_to_base_call(probs: dict):
         phred(float) : probability of the call to be correct
     """
     # Add N:
-    probs['N'] = [1-p  for base, ps in probs.items() for p in ps ]
-    likelihood_per_base = {base:np.product(v)/np.power(0.25, len(v)-1) for base,v in probs.items() }
+    likelihood_per_base = base_probabilities_to_likelihood(probs)
     total_likelihood = sum(likelihood_per_base.values())
     base_probs = Counter({base:p/total_likelihood for base, p in likelihood_per_base.items() }).most_common()
 
@@ -230,3 +321,89 @@ def phredscores_to_base_call(probs: dict):
         return 'N', 0
 
     return (base_probs[0][0],  base_probs[0][1])
+
+
+def pick_best_base_call( *calls ) -> tuple:
+    """ Pick the best base-call from a list of base calls
+
+    Example:
+        >>> pick_best_base_call( ('A',32), ('C',22) ) )
+        ('A', 32)
+
+        >>> pick_best_base_call( ('A',32), ('C',32) ) )
+        None
+
+    Args:
+        calls (generator) : generator/list containing tuples
+
+    Returns:
+        tuple (best_base, best_q) or ('N',0) when there is a tie
+    """
+    # (q_base, quality, ...)
+    best_base, best_q = None, -1
+    tie = False
+
+    for call in calls:
+        if call is None:
+            continue
+        if call[1]>best_q:
+            best_base= call[0]
+            best_q=call[1]
+            tie=False
+        elif call[1]==best_q and call[0]!=best_base:
+            tie=True
+
+    if tie or best_base is None:
+        return ('N',0)
+
+    return best_base, best_q
+
+
+def read_to_consensus_dict(read, start: int = None, end: int = None, only_include_refbase: str = None, skip_first_n_cycles:int = None, skip_last_n_cycles: int = None, min_phred_score: int  = None):
+    """
+    Obtain consensus calls for read, between start and end
+    """
+
+    if read is None:
+        return dict()
+
+    return { (read.reference_name, refpos):
+                    (read.query_sequence[qpos],
+                     read.query_qualities[qpos],
+                     refbase
+                    )
+
+         for qpos, refpos, refbase in read.get_aligned_pairs(
+                                             matches_only=True,
+                                             with_seq=True)
+
+         if (start is None or refpos>=start) and \
+            (end is None or refpos<=end) and \
+            (min_phred_score is None or read.query_qualities[qpos]>=min_phred_score) and \
+            (skip_last_n_cycles is None or ( read.is_reverse and qpos>skip_last_n_cycles) or (not read.is_reverse and qpos<read.infer_query_length()-skip_last_n_cycles)) and \
+            (skip_first_n_cycles is None or ( not read.is_reverse and qpos>skip_first_n_cycles) or ( read.is_reverse and qpos<read.infer_query_length()-skip_first_n_cycles)) and \
+            (only_include_refbase is None or refbase.upper()==only_include_refbase)
+           }
+
+
+def get_consensus_dictionaries(R1, R2, only_include_refbase=None, dove_safe=False, min_phred_score=None, skip_first_n_cycles_R1=None, skip_last_n_cycles_R1=None,skip_first_n_cycles_R2=None, skip_last_n_cycles_R2=None, dove_R2_distance=0, dove_R1_distance=0  ):
+
+    assert (R1 is None or R1.is_read1) and (R2 is None or R2.is_read2)
+
+    if dove_safe:
+        if R1 is None or R2 is None:
+            raise ValueError(
+                'Its not possible to determine a safe region when the alignment of R1 or R2 is not specified')
+
+
+        if R1.is_reverse and not R2.is_reverse:
+            start, end = R2.reference_start + dove_R2_distance, R1.reference_end - dove_R1_distance -1
+        elif not R1.is_reverse and R2.is_reverse:
+            start, end = R1.reference_start + dove_R1_distance, R2.reference_end - dove_R2_distance -1
+        else:
+            raise ValueError('This method only works for inwards facing reads')
+    else:
+        start, end = None, None
+
+    return read_to_consensus_dict(R1, start, end, only_include_refbase=only_include_refbase, skip_last_n_cycles=skip_last_n_cycles_R1, skip_first_n_cycles=skip_first_n_cycles_R1,min_phred_score=min_phred_score), \
+           read_to_consensus_dict(R2, start, end, only_include_refbase=only_include_refbase, skip_last_n_cycles=skip_last_n_cycles_R2, skip_first_n_cycles=skip_last_n_cycles_R2, min_phred_score=min_phred_score)

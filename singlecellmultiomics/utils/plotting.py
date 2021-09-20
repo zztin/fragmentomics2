@@ -6,6 +6,12 @@ import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
 import pysam
 import seaborn as sns
+from matplotlib.patches import Circle
+from itertools import product
+import collections
+import string
+import math
+
 
 # Define chromsome order:
 def sort_chromosome_names(l):
@@ -24,7 +30,10 @@ def sort_chromosome_names(l):
         elif chrom=='MISC_ALT_CONTIGS_SCMO':
             chrom_value=999
         else:
-            chrom_value = int(chrom)
+            try:
+                chrom_value = int(chrom)
+            except Exception as e:
+                chrom_value = 999 + sum((ord(x) for x in chrom))
         chrom_values.append(chrom_value)
 
     indices = sorted(range(len(chrom_values)),key=lambda x:chrom_values[x])
@@ -33,7 +42,7 @@ def sort_chromosome_names(l):
 
 
 class GenomicPlot():
-    def __init__(self, ref_path, contigs=None):
+    def __init__(self, ref_path, contigs=None, ignore_contigs=None):
         """
         Initialise genomic plot
 
@@ -42,7 +51,7 @@ class GenomicPlot():
         """
 
         if contigs is None:
-            self.contigs = sort_chromosome_names(list(filter(is_main_chromosome, get_contig_list_from_fasta(ref_path))))
+            self.contigs = sort_chromosome_names(list(filter(lambda x: is_main_chromosome(x) and (ignore_contigs is None or x not in ignore_contigs) , get_contig_list_from_fasta(ref_path))))
         else:
             self.contigs = contigs
 
@@ -57,7 +66,7 @@ class GenomicPlot():
         # Prune contigs with no length:
         self.contigs = [contig for contig in self.contigs if contig in self.lengths]
 
-    def cn_heatmap(self, df,cell_font_size=3, max_cn=4, method='ward', cmap='bwr',
+    def cn_heatmap(self, df,cell_font_size=3, max_cn=4, method='ward', cmap='bwr', yticklabels=True,
             figsize=(15,20), xlabel = 'Contigs', ylabel='Cells', **kwargs ):
         """
         Create a heatmap from a copy number matrix
@@ -107,7 +116,7 @@ class GenomicPlot():
             clmap = sns.clustermap(df,
                 col_cluster=False,method=method,
                 cmap=cmap, vmax=max_cn,vmin=0,
-                yticklabels=True, figsize=figsize, **kwargs)
+                yticklabels=yticklabels, figsize=figsize, **kwargs)
             ax_heatmap = clmap.ax_heatmap
         except Exception as e:
             print(e)
@@ -189,3 +198,90 @@ class GenomicPlot():
 
     def __getitem__(self, contig):
         return self.axis[contig]
+
+
+
+def plot_plate(coordinate_values: dict,
+               log: bool=True,
+               vmin: float=None,
+               vmax: float =None,
+               cmap_name:str ='viridis',
+               usenorm: bool=True, # Use normlizer (disable when using a custom colormap with discrete values
+               cmap=None):
+
+
+
+    coordinate_values  = {
+        kwgs[:2]:value
+        for kwgs, value in coordinate_values.items()
+    }
+
+    fig, ax = plt.subplots()
+    n_rows = 16
+    n_cols = 24
+    if cmap is None:
+        cmap = matplotlib.cm.get_cmap(cmap_name)
+
+    well2index = collections.defaultdict(dict)
+    index2well = collections.defaultdict(dict)
+    rows = string.ascii_uppercase[:16]
+    columns = list(range(1, 25))
+
+    for ci in range(1, 385):
+        i = ci - 1
+        rowIndex = math.floor(i / len(columns))
+        row = rows[rowIndex]
+        column = columns[i % len(columns)]
+        well2index[384][(row, column)] = ci
+        index2well[384][ci] = (row, column)
+    ###########
+
+    if vmax is None:
+        vmax = np.percentile( list(coordinate_values.values()), 98)
+        if log:
+            vmax = np.power(10,np.ceil(np.log10(vmax)))
+
+    if usenorm:
+        if log:
+            norm = matplotlib.colors.LogNorm(vmin=1 if vmin is None else vmin, vmax=vmax)
+        else:
+            norm = matplotlib.colors.Normalize(vmin=0 if vmin is None else vmin, vmax=vmax)
+
+    for row,col in product(range(n_rows), range(n_cols)) :
+
+        #if (y,x) in coordinate_values:
+        #    print(np.clip(coordinate_values.get((y,x))/vmax,0,1))
+        #print(None if (y,x) not in coordinate_values else cmap( np.clip(coordinate_values.get((y,x))/vmax,0,1)))
+        ax.add_patch( Circle( (col,n_rows-row-1),
+                             radius=0.45,
+                             fill= (True if (row,col) not in coordinate_values else True),
+
+                             fc= (cmap(coordinate_values.get( (row,col), np.nan))) if usenorm is False else
+                                 (cmap(norm(coordinate_values.get( (row,col), np.nan))))))
+
+    ax.set_ylim(-1, n_rows)
+    ax.set_xlim(-1, n_cols)
+    ax.set_xticks(np.arange(n_cols))
+    ax.set_xticklabels(np.arange(1,n_cols+1))
+
+    ax.set_yticks(np.arange(n_rows))
+    ax.set_yticklabels([string.ascii_uppercase[n_rows-i-1] for i in range(n_rows)])
+    ax.xaxis.tick_top()
+
+    ax.grid()
+
+
+    ax.tick_params(axis='y', which='both',length=3, pad=6)
+
+    for label in ax.get_yticklabels():
+        label.set_horizontalalignment('center')
+
+    #norm = mpl.colors.Normalize(vmin=0, vmax=vmax)
+
+    cax = fig.add_axes([0.95, 0.2, 0.03, 0.6])
+    cb = matplotlib.colorbar.ColorbarBase(cax, cmap=cmap,
+                                    norm=norm if usenorm else None,
+                                    orientation='vertical')
+
+    cb.outline.set_visible(False)
+    return fig, ax, cax

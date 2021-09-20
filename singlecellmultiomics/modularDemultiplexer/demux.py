@@ -13,6 +13,8 @@ from colorama import Style
 from colorama import Fore
 import sys
 import os
+from singlecellmultiomics.utils.submission import submit_job
+
 f"!!! PLEASE USE PYTHON 3.6 OR HIGHER !!!"
 
 if __name__ == '__main__':
@@ -24,7 +26,7 @@ if __name__ == '__main__':
 
     argparser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-        description="""%sMulti-library Single cell-demultiplexing%s, written by Buys de Barbanson, Hubrecht institute 2016-2018
+        description="""%sMulti-library Single cell-demultiplexing%s, written by Buys de Barbanson, Hubrecht institute 2016-2021
 										%sExample usage:%s
 
 										List how the demultiplexer will interpret the data: (No demultiplexing is executed)
@@ -106,11 +108,7 @@ if __name__ == '__main__':
         '--scsepf',
         help="Every cell gets a separate FQ file",
         action='store_true')
-    outputArgs.add_argument(
-        '-nextcmd',
-        help="Execute this command when the demultiplexing is finished. When cluster submission is used this command is executed after all jobs are finished",
-        type=str,
-        default=None)
+
 
     bcArgs = argparser.add_argument_group('Barcode', '')
     bcArgs.add_argument(
@@ -187,10 +185,15 @@ if __name__ == '__main__':
         default=None,
         help='use these demultplexing strategies, comma separate to select multiple. For example for cellseq 2 data with 6 basepair umi: -use CS2C8U6 , for combined mspji and Celseq2: MSPJIC8U3,CS2C8U6 if nothing is specified, the best scoring method is selected')
 
+    #argparser.add_argument(
+#        '-ignoreMethods',
+        #help='Do not try to load these methods',
+        #default="scarsMiSeq")
+
     argparser.add_argument(
-        '-ignoreMethods',
-        help='Do not try to load these methods',
-        default="scarsMiSeq")
+        '-only_detect_methods',
+        help='Only auto detect these methods, use a comma as a separator',
+        default=None)
 
     argparser.add_argument(
         '-maxAutoDetectMethods',
@@ -204,10 +207,39 @@ if __name__ == '__main__':
         help='When --use is not specified, what is the lowest percentage yield required to select a demultplexing strategy',
         default=2,
         type=float)
+
+
+    cluster = argparser.add_argument_group('cluster execution')
+    cluster.add_argument(
+        '--cluster',
+        action='store_true',
+        help='split by chromosomes and submit the job on cluster')
+
+    cluster.add_argument(
+        '-mem',
+        default=40,
+        type=int,
+        help='Memory requested per job')
+    cluster.add_argument(
+        '-time',
+        default=52,
+        type=int,
+        help='Time requested per job')
+
+    cluster.add_argument(
+        '-sched',
+        default=None,
+        type=str,
+        help='Scheduler to use: sge, slurm')
+
     args = argparser.parse_args()
     verbosity = 1
 
-    ignoreMethods = args.ignoreMethods.split(',')
+    if args.y and args.sched is not None:
+        raise ValueError('Use --y or -sched [scheduler], never both')
+
+    #ignoreMethods = args.ignoreMethods.split(',')
+    only_detect_methods = args.only_detect_methods.split(',') if args.only_detect_methods is not None else None
     if any(('*' in fq_file for fq_file in args.fastqfiles)):
         raise ValueError(
             "One or more of the fastq file paths contain a '*', these files cannot be interpreted, review your input files")
@@ -233,7 +265,9 @@ if __name__ == '__main__':
     # Load barcodes
     barcodeParser = barcodeFileParser.BarcodeParser(
         hammingDistanceExpansion=args.hd,
-        barcodeDirectory=args.barcodeDir)
+        barcodeDirectory=args.barcodeDir,
+        lazyLoad=("10x_3M-february-2018",)
+        )
 
     # Setup the index parser
     indexFileAlias = args.ifa  # let the multiplex methods decide which index file to use
@@ -270,7 +304,8 @@ if __name__ == '__main__':
     dmx = DemultiplexingStrategyLoader(
         barcodeParser=barcodeParser,
         indexParser=indexParser,
-        ignoreMethods=ignoreMethods,
+        #ignoreMethods=ignoreMethods,
+        only_detect_methods = only_detect_methods,
         indexFileAlias=indexFileAlias)
     dmx.list()
 
@@ -294,6 +329,8 @@ if __name__ == '__main__':
             libraries, testReads=args.dsize, maxAutoDetectMethods=args.maxAutoDetectMethods, minAutoDetectPct=args.minAutoDetectPct, verbose=True)
 
     print(f"\n{Style.BRIGHT}Demultiplexing:{Style.RESET_ALL}")
+
+    final_jobs = []
     for library in libraries:
         if args.use is None:
             processedReadPairs = strategyYieldsForAllLibraries[library]['processedReadPairs']
@@ -316,15 +353,23 @@ if __name__ == '__main__':
             print(
                 f'{Fore.RED}NONE! The library will not be demultiplexed! The used barcodes could not be detected automatically. Please supply the desired method using the -use flag or increase the -dsize parameter to use more reads for detecting the library type.{Style.RESET_ALL}')
 
-        if not args.y:
-            print(f"\n{Style.BRIGHT}--y not supplied, supply --y or execute the command below to run demultiplexing on the cluster:{Style.RESET_ALL}")
+        if not args.y and args.sched is None:
+            print(f"\n{Style.BRIGHT}--y not supplied, supply --y or add -sched slurm to the command to run demultiplexing on the cluster{Style.RESET_ALL}")
+
+        if args.sched is not None:
+            cluster_file_folder = os.path.abspath(os.path.dirname(
+                    args.o)) + '/cluster'
+
             arguments = " ".join(
-                [x for x in sys.argv if x != '--dry' and '--y' not in x and '-submit' not in x and '.fastq' not in x and '.fq' not in x]) + " --y"
+                [x for x in sys.argv if x != '--dry' and  '-sched' !=x and 'slurm'!=x and 'sge'!=x and '--y' not in x and '-submit' not in x and '.fastq' not in x and '.fq' not in x]) + " --y"
 
             submit_in_chunks = (not args.scsepf and not args.nochunk)
             submitted_jobs = []
             filesForLib = []
             group_id = 0
+
+
+            print("Submitting jobs ...")
             for lane in libraries[library]:
                 files_to_submit = []
                 for R1R2 in libraries[library][lane]:
@@ -335,30 +380,37 @@ if __name__ == '__main__':
 
                 if submit_in_chunks:
                     job_name = f'DMX_{library}_{group_id}'
-                    submitted_jobs.append(job_name)
 
-                    print(
-                        'submission.py' +
-                        f' -y -sched auto --py36 -time 50 -t 1 -m 8 -N {job_name} "%s  -g {group_id} -use {",".join([x.shortName for x in selectedStrategies])}"\n' %
-                        ('%s %s' %
-                         (arguments,
-                          " ".join(files_to_submit))))
+                    job_id = submit_job(f'{arguments} -g {group_id} -use {",".join([x.shortName for x in selectedStrategies])} {" ".join(files_to_submit)};',
+                                        job_name=job_name,
+                                        target_directory=cluster_file_folder,
+                                        working_directory=None,
+                                        threads_n=1,
+                                        memory_gb=args.mem,
+                                        time_h=args.time,
+                                        scheduler=args.sched,
+                                        copy_env=True,
+                                        email=None,
+                                        mail_when_finished=False,
+                                        hold=None,
+                                        silent=True,
+                                        submit=True)
+                    submitted_jobs.append(job_id)
                 group_id += 1
 
-            final_jobs = []
+
             if not submit_in_chunks:
                 job_name = f'DMX_{library}'
-                print(
-                    'submission.py' +
-                    f' -y --py36 -time 50 -t 1 -m 8 -sched auto -N {job_name} "%s -use {",".join([x.shortName for x in selectedStrategies])}"\n' %
-                    ('%s %s' %
-                     (arguments,
-                      " ".join(filesForLib))))
-                final_jobs.append(job_name)
+
+                job_id = submit_job(f'{arguments} -g {group_id} -use {",".join([x.shortName for x in selectedStrategies])} {" ".join(filesForLib)};', job_name=job_name, target_directory=cluster_file_folder,  working_directory=None,
+                           threads_n=1, memory_gb=args.mem, time_h=args.time, scheduler=args.sched, copy_env=True,
+                           email=None, mail_when_finished=False, hold=None,submit=True, silent=True)
+
+                final_jobs.append(job_id)
+
             else:
                 # we need a job which glues everything back together
-                # f'{args.o}/{library}/{prefix}demultiplexed
-                # f'{args.o}/{library}/{prefix}rejects
+
                 cmds = [
                     f'cat {args.o}/{library}/*_TEMP_demultiplexedR1.fastq.gz  > {args.o}/{library}/demultiplexedR1.fastq.gz && rm {args.o}/{library}/*_TEMP_demultiplexedR1.fastq.gz',
                     f'cat {args.o}/{library}/*_TEMP_demultiplexedR2.fastq.gz  > {args.o}/{library}/demultiplexedR2.fastq.gz && rm {args.o}/{library}/*_TEMP_demultiplexedR2.fastq.gz',
@@ -371,16 +423,14 @@ if __name__ == '__main__':
 
                 for i, cmd in enumerate(cmds):
                     job_name = f'glue_{library}_{i}'
-                    print(
-                        'submission.py' +
-                        f' -y -sched auto --silent --py36 -time 4 -t 1 -m 2 -N "glue_{library}" "{cmd}" -hold {",".join(submitted_jobs)}')
-                    final_jobs.append(job_name)
 
-            # Execute last command if applicable
-            if args.nextcmd is not None:
-                print(
-                    'submission.py' +
-                    f' -y --silent -sched auto -time 1 -t 1 -m 1 -N "NEXT_{library}" "{cmd}" -hold {",".join(final_jobs)}')
+
+                    job_id = submit_job(cmd, job_name=job_name, target_directory=cluster_file_folder,  working_directory=None,
+                               threads_n=1, memory_gb=2, time_h=4, scheduler=args.sched, copy_env=True,
+                               email=None, mail_when_finished=False, hold=submitted_jobs,submit=True)
+
+
+                    final_jobs.append(job_id)
 
         if args.y:
 
@@ -440,3 +490,6 @@ if __name__ == '__main__':
             if not args.norejects:
                 rejectHandle.close()
             log_handle.write(f'Demultiplexing finished\n')
+
+    if args.sched is not None:
+        print('Final job ids:', ','.join(final_jobs))

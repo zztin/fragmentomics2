@@ -1,0 +1,225 @@
+from singlecellmultiomics.libraryDetection.sequencingLibraryListing import SequencingLibraryLister
+from glob import glob
+import collections
+from singlecellmultiomics.utils import get_contig_list_from_fasta
+
+"""
+This workflow:
+    Starts off from a folder containing fastq files
+    - Detects libraries
+    - demultiplexes
+    - Trims VASA adapters using trim_vasa.py
+    - Maps, sorts and indexes the reads per library
+    - Deduplicates and identifies transcriptome molecules in parallel per contig
+    - Creates QC plots per plate
+    - Creates count tables
+    - Creates QC plots for the merged libraries
+
+"""
+################## configuration ##################
+configfile: "config.json"
+
+# This code detects which libraries are present in the current folder:
+l = SequencingLibraryLister()
+LIBRARIES = l.detect(glob('*.fastq.gz'), merge='_')
+# Flatten to library:[fastqfile, fastqfile, ...]
+fastq_per_lib = collections.defaultdict(list)
+for lib,lane_dict in LIBRARIES.items():
+    for lane,read_dict in lane_dict.items():
+        fastq_per_lib[lib] += read_dict['R1']
+        fastq_per_lib[lib] += read_dict['R2']
+libraries =  list( fastq_per_lib.keys() )
+
+################## configuration end ##################
+
+def get_fastq_file_list(wildcards):
+    # Obtain a list of fastq files associated to wildcards.library
+    global libraries
+    return sorted( fastq_per_lib[wildcards.library] )
+
+def get_target_demux_list():
+    global libraries
+    targets = []
+    for lib in libraries:
+        targets.append('processed_transcriptome/' + lib + "/demultiplexedR1.fastq.gz" )
+        targets.append('processed_transcriptome/' + lib + "/demultiplexedR2.fastq.gz" )
+    return targets
+
+def get_target_tagged_bam_list():
+    return [f"processed_transcriptome/{library}/tagged.bam" for library in libraries]
+
+
+rule all:
+    input:
+        # get_target_demux_list() use this for demux only
+        get_target_tagged_bam_list(),
+
+        expand("processed_transcriptome/{library}/plots/ReadCount.png", library=libraries),
+        expand("processed_transcriptome/{library}/gene_counts.csv", library=libraries),
+        expand("processed_transcriptome/{library}/intron_counts.csv", library=libraries)
+
+
+
+rule SCMO_demux_transcriptome:
+    input:
+        fastqfiles = get_fastq_file_list
+    output:
+        temp("processed_transcriptome/{library}/demultiplexedR1.fastq.gz"),
+        temp("processed_transcriptome/{library}/demultiplexedR2.fastq.gz"),
+        temp("processed_transcriptome/{library}/rejectsR1.fastq.gz"),
+        temp("processed_transcriptome/{library}/rejectsR2.fastq.gz")
+    log:
+        stdout="log/demux_transcriptome/{library}.stdout",
+        stderr="log/demux_transcriptome/{library}.stderr"
+    params: runtime="30h"
+    resources:
+        mem_mb=lambda wildcards, attempt: attempt * 4000
+
+    shell:
+        "demux.py -merge _ {input.fastqfiles} -use CS2C8U6NH -hd 0 -o processed_transcriptome --y > {log.stdout} 2> {log.stderr}"
+
+
+
+rule adapter_trim_transcriptome:
+    input:
+        r2="processed_transcriptome/{library}/poly_trimmed.R2.fastq.gz"
+    log:
+        stdout="log/trim_transcriptome_adapt/{library}.stdout",
+        stderr="log/trim_transcriptome_adapt/{library}.stderr"
+    output:
+        singleton=temp("processed_transcriptome/{library}/trimmed.R2.fastq.gz"),
+    params: runtime="30h"
+    resources:
+        mem_mb=lambda wildcards, attempt: attempt * 4000
+    threads: 8
+    shell:
+        'cutadapt -o {output.singleton} {input.r2} -m 3 -a "IlluminaSmallAdapterConcatBait=GGAACTCCAGTCACNNNNNNATCTCGTATGCCGTCTTCTGCTT" -a "IlluminaIndexAdapter=GGAATTCTCGGGTGCCAAGGAACTCCAGTCACN{{6}}ATCTCGTATGCCGTCTTCTGCTTG"  -g "IlluminaPairedEndPCRPrimer2.0=AGATCGGAAGAGCGN{{6}}CAGGAATGCCGAGACCGATCTCGTATGCCGTCTTCTGCTTG;min_overlap=5" -g "universalPrimer=GATCGTCGGACTGTAGAACTCTGAACGTGTAGATCTCGGTGGTCGCCGTATCATT;min_overlap=5" -a "IlluminaGEX=TTTTTAATGATACGGCGACCACCGAGATCTACACGTTCAGAGTTCTACAGTCCGACGATC;min_overlap=5" -a "IlluminaMultiplexingPCRPrimer=GGAACTCCAGTCACN{{6}}TCTCGTATGCCGTCTTCTGCTTG;min_overlap=5" -g "Aseq=TGGCACCCGAGAATTCCA" -a "Aseq=TGGCACCCGAGAATTCCA"  -a "illuminaSmallRNAAdapter=TCGTATGCCGTCTTCTGCTTGT" --cores {threads} > {log.stdout} 2> {log.stderr}'
+
+
+rule poly_trim_transcriptome:
+    input:
+        r2="processed_transcriptome/{library}/demultiplexedR2.fastq.gz"
+    log:
+        stdout="log/trim_transcriptome/{library}.stdout",
+        stderr="log/trim_transcriptome/{library}.stderr"
+    output:
+        singleton=temp("processed_transcriptome/{library}/poly_trimmed.R2.fastq.gz"),
+    params: runtime="30h"
+    resources:
+        mem_mb=lambda wildcards, attempt: attempt * 4000
+
+    shell:
+        'trim_vasa.py {input.r2} {output.singleton} -min_read_len 20 > {log.stdout} 2> {log.stderr}'
+
+
+rule map_transcriptome:
+    input:
+        ref=config['trans_reference_file'],
+        #r1="processed_transcriptome/{library}/trimmed.R1.fastq.gz",
+        r2="processed_transcriptome/{library}/trimmed.R2.fastq.gz",
+        #single="processed_transcriptome/{library}/trimmed.singletons.fastq.gz"
+    output:
+        #transcriptome_pe_bam = temp("processed_transcriptome/{library}/STAR_mapped_PEAligned.sortedByCoord.out.bam"),
+        transcriptome_se_bam = temp("processed_transcriptome/{library}/STAR_mapped_R2Aligned.sortedByCoord.out.bam"),
+        index = temp("processed_transcriptome/{library}/STAR_mapped_R2Aligned.sortedByCoord.out.bam.bai"),
+        #transcriptome_r2_bam = temp("processed_transcriptome/{library}/STAR_mapped_R2Aligned.sortedByCoord.out.bam"),
+        #transcriptome_merged = temp("processed_transcriptome/{library}/sorted.bam"),
+        #transcriptome_merged_index = temp("processed_transcriptome/{library}/sorted.bam.bai"),
+    log:
+        stdout="log/map_trans/{library}.stdout",
+        stderr="log/map_trans/{library}.stderr"
+    threads: 8
+    params: runtime="30h"
+    resources:
+        mem_mb=lambda wildcards, attempt: 50000 + attempt * 8000
+
+    shell:
+        "STAR --runThreadN {threads} --readFilesCommand zcat  --outSAMtype BAM SortedByCoordinate --outMultimapperOrder Random --outSAMmultNmax 10 \
+        --outFilterMultimapNmax 10 \
+        --genomeDir {input.ref}  \
+        --outSAMattributes All --readFilesIn {input.r2} --outSAMunmapped Within --outFileNamePrefix processed_transcriptome/{wildcards.library}/STAR_mapped_R2 2>> {log.stderr}; samtools index -@{threads} {output.transcriptome_se_bam};"
+
+
+rule SCMO_tagmultiome_VASA:
+    input:
+        bam = "processed_transcriptome/{library}/STAR_mapped_R2Aligned.sortedByCoord.out.bam",
+        bam_index = "processed_transcriptome/{library}/STAR_mapped_R2Aligned.sortedByCoord.out.bam.bai",
+        introns = config['introns'],
+        exons = config['exons']
+
+    params:
+        known_variants =  config['known_variants'], # We only need the variants in the 4sU mode
+        reference_fasta = config['reference_fasta'] # We only need the reference in the 4sU mode
+
+    output:
+        bam = "processed_transcriptome/{library}/tagged.bam",
+        bam_index = "processed_transcriptome/{library}/tagged.bam.bai"
+    log:
+        stdout="log/tag_transcriptome/{library}.stdout",
+        stderr="log/tag_transcriptome/{library}.stderr"
+    threads: 12
+    params: runtime="52h"
+    resources:
+        mem_mb=lambda wildcards, attempt: attempt * 30000 # The amount of memory required is dependent on whether alleles or consensus caller are used
+
+    run:
+        if config.get('4sU','disabled')=='enabled':
+            shell("4SUtagger.py {input.bam} --R2_based  -known {params.known_variants} -reference {params.reference_fasta} -temp_dir processed_transcriptome/{wildcards.library}/scmo_temp -tagthreads {threads} -introns {input.introns} -exons {input.exons} -o {output.bam} > {log.stdout} 2> {log.stderr}")
+        else:
+            shell("bamtagmultiome.py --multiprocess -tagthreads {threads} -introns {input.introns} -exons {input.exons} -method vasa {input.bam} -o {output.bam} > {log.stdout} 2> {log.stderr}")
+
+
+rule SCMO_library_stats:
+    input:
+        bam = "processed_transcriptome/{library}/tagged.bam",
+        r1="processed_transcriptome/{library}/demultiplexedR1.fastq.gz", # It needs these to count how many raw reads were present in the lib.
+        r2="processed_transcriptome/{library}/demultiplexedR2.fastq.gz",
+        r1_rejects="processed_transcriptome/{library}/rejectsR1.fastq.gz",
+        r2_rejects="processed_transcriptome/{library}/rejectsR2.fastq.gz"
+    output:
+      "processed_transcriptome/{library}/plots/ReadCount.png"
+    log:
+        stdout="log/library_stats/{library}.stdout",
+        stderr="log/library_stats/{library}.stderr"
+    threads: 1
+    params: runtime="30h"
+
+    shell:
+        "libraryStatistics.py processed_transcriptome/{wildcards.library} -tagged_bam /tagged.bam > {log.stdout} 2> {log.stdout}"
+
+
+rule count_genes:
+    input:
+        bam = "processed_transcriptome/{library}/tagged.bam"
+    output:
+        csv = "processed_transcriptome/{library}/gene_counts.csv"
+    threads: 1
+    params:
+        runtime="50h",
+        counting_min_mq = config['counting_min_mq']
+    log:
+        stdout="log/counting/{library}.stdout",
+        stderr="log/counting/{library}.stderr",
+    resources:
+        mem_mb=lambda wildcards, attempt: attempt * 8000
+
+    shell:
+      "bamToCountTable.py {input.bam} -sampleTags SM -joinedFeatureTags reference_name,GN,gn -o {output.csv} --dedup --r1only > {log.stdout} 2> {log.stderr}"
+
+rule count_introns:
+    input:
+        bam = "processed_transcriptome/{library}/tagged.bam"
+    output:
+        csv = "processed_transcriptome/{library}/intron_counts.csv"
+    threads: 1
+    params:
+        runtime="50h",
+        counting_min_mq = config.get('counting_min_mq',0)
+    log:
+        stdout="log/counting/{library}.stdout",
+        stderr="log/counting/{library}.stderr",
+    resources:
+        mem_mb=lambda wildcards, attempt: attempt * 8000
+
+    shell:
+      "bamToCountTable.py {input.bam} -sampleTags SM -joinedFeatureTags reference_name,IN -o {output.csv} --dedup --r1only > {log.stdout} 2> {log.stderr}"

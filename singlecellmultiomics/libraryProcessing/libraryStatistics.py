@@ -16,7 +16,7 @@ from colorama import Back
 from colorama import Style
 import singlecellmultiomics.pyutils as pyutils
 from singlecellmultiomics.tagtools import tagtools
-import pysamiterators.iterators as pysamIterators
+from pysamiterators import MatePairIteratorIncludingNonProper
 import gzip
 import pickle
 import subprocess
@@ -64,7 +64,10 @@ if __name__ == '__main__':
         '--plotsOnly',
         action='store_true',
         help="only make plots")
-
+    argparser.add_argument(
+        '--fatal',
+        action='store_true',
+        help="Fatal error on any issue")
     argparser.add_argument(
         '--sl',
         action='store_true',
@@ -87,7 +90,6 @@ if __name__ == '__main__':
     args = argparser.parse_args()
 
     for library in args.libraries:
-        library_name = library
         if library.endswith('.bam'):
             # the library is a bam file..
             bamFile = os.path.abspath(library)
@@ -98,6 +100,7 @@ if __name__ == '__main__':
         else:
             print("A library was supplied, automatically detecting files ..")
             bamFile = None
+            library_name = os.path.basename(library)
         rc = ReadCount(args)  # Is also mappability
 
         statistics = [
@@ -130,7 +133,8 @@ if __name__ == '__main__':
                 AlleleHistogram(args),
                 DataTypeHistogram(args),
                 TagHistogram(args),
-                PlateStatistic(args)
+                PlateStatistic(args),
+                PlateStatistic2(args)
             ])
 
         demuxFastqFilesLookup = [
@@ -232,9 +236,10 @@ if __name__ == '__main__':
         if bamFile is not None and os.path.exists(bamFile):
             print(f'\tTagged > {bamFile}')
             with pysam.AlignmentFile(bamFile) as f:
-                for i, read in enumerate(f):
+
+                for i, (R1,R2) in enumerate(MatePairIteratorIncludingNonProper(f)):
                     for statistic in statistics:
-                        statistic.processRead(read)
+                        statistic.processRead(R1,R2)
                     if args.head is not None and i >= (args.head - 1):
                         break
         else:
@@ -290,6 +295,8 @@ if __name__ == '__main__':
             except Exception as e:
                 if args.v:
                     print(e)
+                if args.fatal:
+                    raise
 
         if bamFile is not None:
             for statistic in full_file_statistics:
@@ -299,6 +306,8 @@ if __name__ == '__main__':
                 except Exception as e:
                     if args.v:
                         print(e)
+                    if args.fatal:
+                        raise
 
 
 
@@ -308,7 +317,7 @@ if __name__ == '__main__':
             table_dir = f'{library}/tables'
             statFile = f'{library}/statistics.pickle.gz'
         else:
-            plot_dir = args.o
+            plot_dir = f'{args.o}/plots'
             table_dir = f'{args.o}/tables'
             statFile = f'{args.o}/statistics.pickle.gz'
 
@@ -339,7 +348,9 @@ if __name__ == '__main__':
                     try:
                         statDict.update(pickle.load(f))
                     except Exception as e:
-                        pass
+                        if args.fatal:
+                            raise
+
 
             if not os.path.exists(table_dir):
                 os.makedirs(table_dir)
@@ -352,9 +363,12 @@ if __name__ == '__main__':
                     statistic.to_csv(
                         f'{table_dir}/{statistic.__class__.__name__}_{library_name}.csv')
                 except Exception as e:
+                    if args.fatal:
+                        raise
                     if args.v:
                         import traceback
                         traceback.print_exc()
+
 
         # Make RT reaction plot:
         if bamFile is not None and os.path.exists(bamFile):

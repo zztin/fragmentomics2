@@ -77,9 +77,39 @@ class FeatureContainer(Prefetcher):
     def __len__(self):
         return sum(len(f) for f in self.features.values())
 
-
     def preload_GTF(self, **kwargs):
         self.preload_list.append( {'gtf':kwargs} )
+
+    def get_gene_to_location_dict(self, meta_key='gene_name', with_strand=False):
+        """
+        generate dictionary, {gene_name: contig,start,end}
+
+        Args:
+            meta_key(str): key of the meta information used to use as primary key for the returned gene_locations
+
+        Returns:
+            gene_locations(dict)
+        """
+        location_map = {}
+
+        for contig, start, end, name, strand, meta in self:
+            meta =dict(meta)
+            try:
+                if with_strand:
+                    location_map[ meta[meta_key]] = (contig, start,end,strand)
+                else:
+                    location_map[ meta[meta_key]] = (contig, start,end)
+            except Exception as e:
+                pass
+
+        return location_map
+
+
+
+    def __iter__(self):
+        for contig, contig_features in self.features.items():
+            for feature in contig_features:
+                yield (contig,)+ feature
 
 
     def instance(self, arg_update):
@@ -597,6 +627,18 @@ class FeatureContainer(Prefetcher):
 
     @functools.lru_cache(maxsize=512)
     def findFeaturesAt(
+            self,
+            chromosome,
+            lookupCoordinate,
+            strand=None,
+            optim='bdbnb'):
+        return self._findFeaturesAt(
+                chromosome,
+                lookupCoordinate,
+                strand=strand,
+                optim=optim)
+
+    def _findFeaturesAt(
             self,
             chromosome,
             lookupCoordinate,

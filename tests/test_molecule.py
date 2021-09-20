@@ -71,7 +71,7 @@ class TestMolecule(unittest.TestCase):
 
             # A proper pair
             read_G_a = get_chic_read(test_sam.header, 'read_G', start=102,  paired=True)
-            read_G_b = get_chic_read(test_sam.header, 'read_G', start=130, read1=False, paired=True)
+            read_G_b = get_chic_read(test_sam.header, 'read_G', start=130, read1=False, paired=True, is_reverse=True)
 
             # A stale R2
             read_H = get_chic_read(test_sam.header, 'read_H', start=130,  paired=True, proper_pair=False, read1=False)
@@ -111,8 +111,7 @@ class TestMolecule(unittest.TestCase):
 
             self.assertTrue(frag_A==frag_B)
 
-            print(frag_G, frag_I)
-            self.assertTrue(frag_G==frag_I)
+            self.assertEqual(frag_G, frag_I)
             self.assertFalse(frag_A==frag_C)
             self.assertFalse(frag_A==frag_D)
             self.assertFalse(frag_C==frag_D)
@@ -215,7 +214,7 @@ class TestMolecule(unittest.TestCase):
             every_fragment_as_molecule=True
             )):
                 pass
-            self.assertEqual(i,337)
+            self.assertEqual(i,340)
 
     def test_every_fragment_as_molecule_np_iterator(self):
 
@@ -234,6 +233,7 @@ class TestMolecule(unittest.TestCase):
             molecule_class=singlecellmultiomics.molecule.Molecule,
             fragment_class=singlecellmultiomics.fragment.Fragment,
             every_fragment_as_molecule=True,
+            yield_invalid=True,
             iterator_class=pysamiterators.MatePairIteratorIncludingNonProper
             )):
                 if m[0].has_R1():
