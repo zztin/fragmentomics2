@@ -32,3 +32,7 @@ _static
 _templates
 dev/
 data/test
+
+#Pycharm
+.idea/
+.DS_Store

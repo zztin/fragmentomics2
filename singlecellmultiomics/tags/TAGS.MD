@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 | Tag   | Description                                  | Is phred   | Written by default   |
 |-------|----------------------------------------------|------------|----------------------|
 | A2    | Read2Clipped3primeBasesKmer                  | No         | No                   |

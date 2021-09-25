@@ -12,6 +12,7 @@ from singlecellmultiomics.utils import is_main_chromosome
 from singlecellmultiomics.utils.submission import submit_job
 import singlecellmultiomics.alleleTools
 from singlecellmultiomics.universalBamTagger.customreads import CustomAssingmentQueryNameFlagger
+from singlecellmultiomics.universalBamTagger.rca_th import RCA_Tidehunter_Flagger
 import singlecellmultiomics.features
 from pysamiterators import MatePairIteratorIncludingNonProper, MatePairIterator
 from singlecellmultiomics.universalBamTagger.tagging import generate_tasks, prefetch, run_tagging_tasks
@@ -58,7 +59,7 @@ argparser.add_argument(
     vasa (VASA transcriptomic data)
     cs (CELseq data, 1 and 2)
     cs_feature_counts (Single end, deduplicate using a bam file tagged using featurecounts, deduplicates a umi per gene)
-    fl_feature_counts (deduplicate using a bam file tagged using featurecounts, deduplicates based on fragment position)
+    fl_feature_counts (deduplicate using a bam file tagged using cd featurecounts, deduplicates based on fragment position)
     nla_taps (Data with digested by Nla III enzyme and methylation converted by TAPS)
     chic_taps (Data with digested by mnase enzyme and methylation converted by TAPS)
     nla_tapsp_transcriptome (Add feature annotation to nla_ptaps mode )
@@ -76,6 +77,7 @@ argparser.add_argument(
     action='store_true',
     help='Ignore truncation')
 argparser.add_argument('-custom_flags', type=str, default="MI,RX,bi,SM")
+argparser.add_argument('-sample_name', type=str, default="Cyclomic_TH")
 
 r_select = argparser.add_argument_group('Region selection')
 r_select.add_argument('-head', type=int)
@@ -659,6 +661,8 @@ def run_multiome_tagging(args):
         if args.qflagger == 'custom_flags':
             query_name_flagger = CustomAssingmentQueryNameFlagger(
                 args.custom_flags.split(','))
+        elif args.qflagger == 'cyclomics_th':
+            queryNameFlagger = RCA_Tidehunter_Flagger(SMTag=args.sample_name)
         else:
             raise ValueError("Select from 'custom_flags, ..' ")
 
@@ -762,6 +766,9 @@ def run_multiome_tagging(args):
         bp_per_job = 3_000_000
         bp_per_segment = 3_000_000
         fragment_size = 0
+    # elif args.method == 'cyclomics':
+    #     moleculeClass = singlecellmultiomics.molecule.CycMolecule
+    #     fragmentClass = singlecellmultiomics.fragment.CycFragment
 
     elif args.method == 'chic':
         molecule_class = singlecellmultiomics.molecule.CHICMolecule
