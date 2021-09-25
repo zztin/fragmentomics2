@@ -25,7 +25,7 @@ class CHICMolecule(Molecule):
 
     def _add_fragment(self,fragment):
         # Update the cut coordinate tho the (left most extreme value)
-        self.assignment_radius =fragment.assignment_radius
+        self.assignment_radius = fragment.assignment_radius
 
         if fragment.site_location is not None:
 

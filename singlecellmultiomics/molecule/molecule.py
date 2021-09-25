@@ -575,8 +575,8 @@ class Molecule():
 
         for read in reads:
             read.set_tag('SM', self.sample)
-            if hasattr(self, 'get_cut_site'):
-                read.set_tag('DS', self.get_cut_site()[1])
+#            if hasattr(self, 'get_cut_site'):
+#                read.set_tag('DS', self.get_cut_site()[1])
 
             if self.umi is not None:
                 read.set_tag('RX', self.umi)
