@@ -215,6 +215,7 @@ class Molecule():
         self.kwargs = kwargs
         self.reference = reference
         self.read_names = []
+        self.rca_count = 0
         self.fragments = []
         self.spanStart = None
         self.spanEnd = None
@@ -527,6 +528,7 @@ class Molecule():
             - TF : total fragments
             - ms : size of the molecule (largest fragment)
             - RN : read_names of the first added fragment
+            - RC : rca count
 
         """
         self.is_valid(set_rejection_reasons=True)
@@ -536,6 +538,7 @@ class Molecule():
             self.set_meta('mI', self.umi)
         if self.allele is not None:
             self.set_meta('DA', str(self.allele))
+        self.set_meta('RC', self.rca_count)
 
         # Set total amount of associated fragments
         self.set_meta('TF', len(self.fragments) + self.overflow_fragments)
@@ -583,6 +586,7 @@ class Molecule():
 #            if hasattr(self, 'get_cut_site'):
 #                read.set_tag('DS', self.get_cut_site()[1])
             read.set_tag('RN',  " ".join(self.read_names))
+            read.set_tag('RC', self.rca_count)
 
             if self.umi is not None:
                 read.set_tag('RX', self.umi)
@@ -1693,6 +1697,8 @@ class Molecule():
             fragment.set_duplicate(True)
         if fragment.read_name not in self.read_names:
             self.read_names.append(fragment.read_name)
+            # add rca count of overlapping fragments
+            self.rca_count += fragment.rca_count
 
         self.fragments.append(fragment)
 

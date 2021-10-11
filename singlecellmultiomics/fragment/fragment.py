@@ -871,15 +871,26 @@ class Fragment():
 
         # if self.strand != other.strand:
         #     return False
+        if self.read_name in other.read_names:
+            if self.span[0] != other.span[0]:
+                return False
+            if self.span[2] - other.span[1] < 0:
+                return False
+            elif other.span[2] - self.span[1] < 0:
+                return False
+            return True
 
         if not self.has_valid_span() or not other.has_valid_span():
             return False
 
+
         if min(abs(self.span[1] - other.span[1]), abs(self.span[2] - other.span[2])) > self.assignment_radius:
             return False
 
-        # Make sure UMI's are similar enough, more expensive hamming distance
-        # calculation
+
+
+
+        # Disable umi calculation
         return True
 
     def __getitem__(self, index):
