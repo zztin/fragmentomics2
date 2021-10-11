@@ -11,6 +11,8 @@ class CHICFragment(Fragment):
                  umi_hamming_distance=1,
                  invert_strand=False,
                  no_umi_cigar_processing=False,
+                 read_name=None,
+                 rca_count=1,
                  **kwargs
                  ):
         self.invert_strand = invert_strand
@@ -30,7 +32,9 @@ class CHICFragment(Fragment):
                           R1_primer_length=R1_primer_length,
                           R2_primer_length=R2_primer_length,
                           umi_hamming_distance=umi_hamming_distance,
-                          max_NUC_stretch = 18,
+                          max_NUC_stretch=18,
+                          read_name=None,
+                          rca_count=1,
                           **kwargs
 
                 )

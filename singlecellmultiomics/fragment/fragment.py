@@ -56,7 +56,8 @@ class Fragment():
                  max_NUC_stretch: int = None,
                  read_group_format: int = 0,  # R1 forward, R2 reverse
                  library_name: str = None, # Overwrites the library name
-                 single_end: bool = False
+                 single_end: bool = False,
+                 read_name: str = None,
                  ):
         """
         Initialise Fragment
@@ -116,6 +117,8 @@ class Fragment():
         self.max_NUC_stretch = max_NUC_stretch
         self.qcfail = False
         self.single_end = single_end
+        self.read_name = None
+        self.rca_count = 1
 
         # Span:\
         self.span = [None, None, None]
@@ -146,6 +149,13 @@ class Fragment():
                 self.random_primer_sequence = read.get_tag('rS')
                 self.unsafe_trimmed = True
                 self.R2_primer_length = 0 # Set R2 primer length to zero, as the primer has been removed
+
+            if read.has_tag('RN'):
+                self.read_name = read.get_tag('RN')
+
+            if read.has_tag('RC'):
+                self.rca_count = read.get_tag('RC')
+
 
             if not read.is_unmapped:
                 self.is_mapped = True
@@ -700,8 +710,8 @@ class Fragment():
         Extract umi from 'RX' tag and store the UMI in the Fragment object
         """
         for read in self.reads:
-            if read is not None and read.has_tag('RX'):
-                self.umi = read.get_tag('RX')
+            if read is not None and read.has_tag('BX'):
+                self.umi = read.get_tag('BX')
 
     def get_umi(self):
         """
@@ -750,11 +760,15 @@ class Fragment():
 
         if self.umi == other.umi:
             return True
+        if self.umi == 'NotFound':
+            return True
         if self.umi_hamming_distance == 0:
             return False
         else:
+            # one is NotFound, one is XXXX
             if len(self.umi)!=len(other.umi):
-                return False
+                return True
+            # This doesn't take into account of distance from a base to X
             return hamming_distance(
                 self.umi, other.umi) <= self.umi_hamming_distance
 
@@ -852,23 +866,21 @@ class Fragment():
             False
 
         """
-        if self.sample != other.sample:
-            return False
+        # if self.sample != other.sample:
+        #     return False
 
-        if self.strand != other.strand:
-            return False
+        # if self.strand != other.strand:
+        #     return False
 
         if not self.has_valid_span() or not other.has_valid_span():
             return False
 
-        if min(abs(self.span[1] -
-                   other.span[1]), abs(self.span[2] -
-                                       other.span[2])) > self.assignment_radius:
+        if min(abs(self.span[1] - other.span[1]), abs(self.span[2] - other.span[2])) > self.assignment_radius:
             return False
 
         # Make sure UMI's are similar enough, more expensive hamming distance
         # calculation
-        return self.umi_eq(other)
+        return True
 
     def __getitem__(self, index):
         """

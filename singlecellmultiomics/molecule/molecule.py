@@ -214,6 +214,7 @@ class Molecule():
         """
         self.kwargs = kwargs
         self.reference = reference
+        self.read_names = []
         self.fragments = []
         self.spanStart = None
         self.spanEnd = None
@@ -525,8 +526,12 @@ class Molecule():
             - ap : phasing information (if allele_resolver is set)
             - TF : total fragments
             - ms : size of the molecule (largest fragment)
+            - RN : read_names of the first added fragment
+
         """
         self.is_valid(set_rejection_reasons=True)
+        if self.read_names is not None:
+            self.set_meta('RN', " ".join(self.read_names))
         if self.umi is not None:
             self.set_meta('mI', self.umi)
         if self.allele is not None:
@@ -577,6 +582,7 @@ class Molecule():
             read.set_tag('SM', self.sample)
 #            if hasattr(self, 'get_cut_site'):
 #                read.set_tag('DS', self.get_cut_site()[1])
+            read.set_tag('RN',  " ".join(self.read_names))
 
             if self.umi is not None:
                 read.set_tag('RX', self.umi)
@@ -774,7 +780,11 @@ class Molecule():
         for read in self.iter_reads():
             for qpos, rpos in read.get_aligned_pairs(matches_only=True):
                 qbase = read.seq[qpos]
-                qqual = read.query_qualities[qpos]
+                try:
+                    qqual = read.query_qualities[qpos]
+                except TypeError as e:
+                    no_base_qual = True
+                    qqual = 40
                 # @ todo reads which span multiple chromosomes
                 obs[(self.chromosome, rpos)][qbase].append(1 - np.power(10, -qqual / 10))
         return obs
@@ -805,7 +815,7 @@ class Molecule():
         partial_phred = []
 
         for operation, amount in CIGAR:
-            if operation == 'N':
+            if operation == 'D':
                 if max_N_span is not None and amount > max_N_span:
                     yield reference_start, reference_end, partial_sequence, partial_phred, partial_CIGAR, partial_MD
                     # Clear all
@@ -1185,7 +1195,7 @@ class Molecule():
         for start, end in self.get_aligned_blocks():
 
             if prev_end is not None:
-                CIGAR.append(('N', start - prev_end - 1))
+                CIGAR.append(('D', start - prev_end - 1))
             CIGAR.append(('M', (end - start + 1)))
             prev_end = end
 
@@ -1517,7 +1527,7 @@ class Molecule():
         Returns:
             barcode sequences (set) : barcode sequence(s)
         """
-        return set(read.get_tag('BC') for read in self.iter_reads())
+        return set(read.get_tag('BX') for read in self.iter_reads())
 
     def get_raw_barcode_sequences(self):
         """Obtain (Cell) barcode sequences associated to molecule, not hamming corrected
@@ -1681,6 +1691,8 @@ class Molecule():
         # if we already had a fragment, this fragment is a duplicate:
         if len(self.fragments) > 1:
             fragment.set_duplicate(True)
+        if fragment.read_name not in self.read_names:
+            self.read_names.append(fragment.read_name)
 
         self.fragments.append(fragment)
 
