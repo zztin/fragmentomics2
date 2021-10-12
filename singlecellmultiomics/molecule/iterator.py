@@ -433,6 +433,7 @@ class MoleculeIterator():
                             m = self.molecules_per_cell[hash_group].pop(i - j)
                             m.__finalise__()
                             yield from self.yield_func(m)
+#??                         self._clear_cache()
 
         # Yield remains
         if self.pooling_method == 0:

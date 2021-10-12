@@ -591,8 +591,9 @@ class Molecule():
             if self.umi is not None:
                 read.set_tag('RX', self.umi)
                 bc = list(self.get_barcode_sequences())[0]
+                read.set_tag('BX', bc)
                 read.set_tag('BC', bc)
-                read.set_tag('MI', bc + self.umi)
+                read.set_tag('MI', self.umi)
 
             # Store total amount of RT reactions:
             read.set_tag('TR', len(self.get_rt_reactions()))
