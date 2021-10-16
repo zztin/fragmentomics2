@@ -13,35 +13,42 @@ import argparse
 import time
 import linecache
 import os
-import tracemalloc
+#import tracemalloc
 
-def display_top(snapshot, key_type='lineno', limit=10):
+def display_top(snapshot, filename, key_type='lineno', limit=10):
     snapshot = snapshot.filter_traces((
         tracemalloc.Filter(False, "<frozen importlib._bootstrap>"),
         tracemalloc.Filter(False, "<unknown>"),
     ))
     top_stats = snapshot.statistics(key_type)
-
+    records = []
+    records.append("Top %s lines" % limit)
     print("Top %s lines" % limit)
     for index, stat in enumerate(top_stats[:limit], 1):
         frame = stat.traceback[0]
-        print("#%s: %s:%s: %.1f KiB"
+        print("#%s: %s:%s: %.1f KiB" % (index, frame.filename, frame.lineno, stat.size / 1024))
+        records.append("#%s: %s:%s: %.1f KiB"
               % (index, frame.filename, frame.lineno, stat.size / 1024))
         line = linecache.getline(frame.filename, frame.lineno).strip()
         if line:
-            print('    %s' % line)
+            records.append('    %s' % line)
+            print('   %s' % line)
 
     other = top_stats[limit:]
     if other:
         size = sum(stat.size for stat in other)
+        records.append("%s other: %.1f KiB" % (len(other), size / 1024))
         print("%s other: %.1f KiB" % (len(other), size / 1024))
     total = sum(stat.size for stat in top_stats)
+    records.append("Total allocated size: %.1f KiB" % (total / 1024))
     print("Total allocated size: %.1f KiB" % (total / 1024))
-
+    with open(f"{args.out_path}/../{filename}.tracemalloc.log", "w+") as f:
+        f.write("\n".join(records))
 
 
 
 if __name__=="__main__":
+    pid = os.getpid()
     parser = argparse.ArgumentParser(description='Deduplicate base on molecular location.')
     parser.add_argument('--read_bam', type=str,
                     help='bam file path')
@@ -54,8 +61,8 @@ if __name__=="__main__":
                                                   'end sites within max 2bp range. Direction of the read is set by the first added read.')
 
     args = parser.parse_args()
-    SM_bam = f"{args.out_path}/{args.prefix}_test.SMtagged.sorted.bam"
-    t_bam = f"{args.out_path}/{args.prefix}_deduplicated_samecoor.tagged.bam"
+    SM_bam = f"{args.out_path}/{args.prefix}_{pid}_test.SMtagged.sorted.bam"
+    t_bam = f"{args.out_path}/{args.prefix}_{pid}_deduplicated_samecoor.tagged.bam"
 
     # autodetect reference:
     reference = None
@@ -81,9 +88,16 @@ if __name__=="__main__":
     timeA = time.time()
     print('SM tag written.', timeA)
 
-    tracemalloc.start()
+
+
+#    tracemalloc.start()
     with pysam.AlignmentFile(SM_bam) as f:
+        
+#        snapshot1 = tracemalloc.take_snapshot()
+       
         with sorted_bam_file(t_bam, origin_bam=f, ) as target_bam:
+            
+#            snapshot2 = tracemalloc.take_snapshot()
             for i, m in enumerate(MoleculeIterator(
                             alignments=f,
                             moleculeClass=singlecellmultiomics.molecule.chic.CHICMolecule,
@@ -95,8 +109,8 @@ if __name__=="__main__":
                             max_buffer_size=1000000,
 
             )):
-                # show memory A
-                # logger
+                
+#                snapshot3 = tracemalloc.take_snapshot()
                 read_name = f'consensus_{m.get_a_reference_id()}_{i}'
                 # write tags to all fragments associated with the molecule
                 m.write_tags()
@@ -107,9 +121,17 @@ if __name__=="__main__":
                               no_source_reads=True,
                               )
 
+#                top_stats = snapshot3.compare_to(snapshot2, 'lineno')
+#                print("[ Top 10 differences ]")
+#                for stat in top_stats[:10]:
+#                    print(stat)
 
-    snapshot = tracemalloc.take_snapshot()
-    display_top(snapshot)
+#                if i % 10000 == 1: 
+#
+#                    snapshot = tracemalloc.take_snapshot()
+#                    display_top(snapshot, filename=f'{args.prefix}_{pid}')
+#                    tracemalloc.start()
+
 
     pysam.index(t_bam, f'{t_bam}.bai')
     if args.SM is not None:
