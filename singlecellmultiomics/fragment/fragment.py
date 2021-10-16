@@ -117,7 +117,7 @@ class Fragment():
         self.max_NUC_stretch = max_NUC_stretch
         self.qcfail = False
         self.single_end = single_end
-        self.read_name = None
+        self.read_name = read_name
         self.rca_count = 1
 
         # Span:\
