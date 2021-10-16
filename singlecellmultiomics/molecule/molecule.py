@@ -785,13 +785,15 @@ class Molecule():
         for read in self.iter_reads():
             for qpos, rpos in read.get_aligned_pairs(matches_only=True):
                 qbase = read.seq[qpos]
-                try:
-                    qqual = read.query_qualities[qpos]
-                except TypeError as e:
-                    no_base_qual = True
-                    qqual = 40
+                # try:
+                #     qqual = read.query_qualities[qpos]
+                # except TypeError as e:
+                #     no_base_qual = True
+                #     qqual = 10
                 # @ todo reads which span multiple chromosomes
-                obs[(self.chromosome, rpos)][qbase].append(1 - np.power(10, -qqual / 10))
+                # TODO: include rca count as confidence (same read name should be deduplicated first. Complicated.)
+                obs[(self.chromosome, rpos)][qbase].append(0.9)
+                # obs[(self.chromosome, rpos)][qbase].append(1 - np.power(10, -qqual / 10))
         return obs
 
 
