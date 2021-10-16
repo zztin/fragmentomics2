@@ -1699,7 +1699,7 @@ class Molecule():
         if fragment.read_name not in self.read_names:
             self.read_names.append(fragment.read_name)
             # add rca count of overlapping fragments
-            self.rca_count += fragment.rca_count
+            self.rca_count += float(fragment.rca_count)
 
         self.fragments.append(fragment)
 
