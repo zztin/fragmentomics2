@@ -32,7 +32,7 @@ _static
 _templates
 dev/
 data/test
-
+data/cyclomics/
 #Pycharm
 .idea/
 .DS_Store
