@@ -61,7 +61,7 @@ if __name__=="__main__":
                                                   'end sites within max 2bp range. Direction of the read is set by the first added read.')
 
     args = parser.parse_args()
-    SM_bam = f"{args.out_path}/{args.prefix}_{pid}_test.SMtagged.sorted.bam"
+    SM_bam = f"{args.out_path}/{args.prefix}_{pid}.SMtagged.sorted.bam"
     t_bam = f"{args.out_path}/{args.prefix}_{pid}_deduplicated_samecoor.tagged.bam"
 
     # autodetect reference:
