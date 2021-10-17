@@ -13,16 +13,16 @@ import argparse
 import time
 import linecache
 import os
-#import tracemalloc
+import tracemalloc
 
-def display_top(snapshot, filename, key_type='lineno', limit=10):
+def display_top(snapshot, filename, i, key_type='lineno', limit=10):
     snapshot = snapshot.filter_traces((
         tracemalloc.Filter(False, "<frozen importlib._bootstrap>"),
         tracemalloc.Filter(False, "<unknown>"),
     ))
     top_stats = snapshot.statistics(key_type)
     records = []
-    records.append("Top %s lines" % limit)
+    records.append("Top %s lines by molecule no.%s" % (limit, i))
     print("Top %s lines" % limit)
     for index, stat in enumerate(top_stats[:limit], 1):
         frame = stat.traceback[0]
@@ -90,10 +90,9 @@ if __name__=="__main__":
 
 
 
-#    tracemalloc.start()
+    tracemalloc.start()
     with pysam.AlignmentFile(SM_bam) as f:
         
-#        snapshot1 = tracemalloc.take_snapshot()
        
         with sorted_bam_file(t_bam, origin_bam=f, ) as target_bam:
             
@@ -113,6 +112,9 @@ if __name__=="__main__":
 #                snapshot3 = tracemalloc.take_snapshot()
                 read_name = f'consensus_{m.get_a_reference_id()}_{i}'
                 # write tags to all fragments associated with the molecule
+
+                snapshot1 = tracemalloc.take_snapshot()
+
                 m.write_tags()
 
                 m.write_pysam(target_bam,
@@ -126,11 +128,15 @@ if __name__=="__main__":
 #                for stat in top_stats[:10]:
 #                    print(stat)
 
-#                if i % 10000 == 1: 
-#
-#                    snapshot = tracemalloc.take_snapshot()
-#                    display_top(snapshot, filename=f'{args.prefix}_{pid}')
-#                    tracemalloc.start()
+                if i % 200 == 1: 
+                    print('snapshot',i, )
+                    snapshot2 = tracemalloc.take_snapshot()
+                    display_top(snapshot2, filename=f'{args.prefix}_{pid}')
+
+                    top_stats = snapshot2.compare_to(snapshot1, 'lineno')
+                    print("[ Top 10 differences ]")
+                    for stat in top_stats[:10]:
+                        print(stat)
 
 
     pysam.index(t_bam, f'{t_bam}.bai')
