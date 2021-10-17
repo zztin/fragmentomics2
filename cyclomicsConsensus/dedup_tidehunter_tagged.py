@@ -128,15 +128,16 @@ if __name__=="__main__":
 #                for stat in top_stats[:10]:
 #                    print(stat)
 
-                if i % 200 == 1: 
-                    print('snapshot',i, )
-                    snapshot2 = tracemalloc.take_snapshot()
-                    display_top(snapshot2, filename=f'{args.prefix}_{pid}')
-
-                    top_stats = snapshot2.compare_to(snapshot1, 'lineno')
-                    print("[ Top 10 differences ]")
-                    for stat in top_stats[:10]:
-                        print(stat)
+                if i > 3800:
+                    if i % 10 == 1: 
+                        print('snapshot',i, )
+                        snapshot2 = tracemalloc.take_snapshot()
+                        display_top(snapshot2, filename=f'{args.prefix}_{pid}', i = i)
+    
+                        top_stats = snapshot2.compare_to(snapshot1, 'lineno')
+                        print("[ Top 10 differences ]")
+                        for stat in top_stats[:10]:
+                            print(stat)
 
 
     pysam.index(t_bam, f'{t_bam}.bai')
