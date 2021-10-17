@@ -103,10 +103,11 @@ if __name__=="__main__":
                             fragmentClass=CHICFragment,
                             every_fragment_as_molecule=False,
                             perform_qflag=False,
-                            molecule_class_args={"reference": reference},
+                            molecule_class_args={"reference": reference, "max_associated_fragments": 100},
                             fragment_class_args={"assignment_radius": 4},
                             max_buffer_size=1000000,
-
+                            yield_overflow=False,
+    
             )):
                 
 #                snapshot3 = tracemalloc.take_snapshot()
@@ -128,12 +129,14 @@ if __name__=="__main__":
 #                for stat in top_stats[:10]:
 #                    print(stat)
 
-                if i > 3800:
-                    if i % 10 == 1: 
+                if i > 3855:
                         print('snapshot',i, )
+                        print(m.span)
+                        print(len(m.read_names))
+                        print(m.overflow_fragments)
+                        print(len(m.fragments))
                         snapshot2 = tracemalloc.take_snapshot()
                         display_top(snapshot2, filename=f'{args.prefix}_{pid}', i = i)
-    
                         top_stats = snapshot2.compare_to(snapshot1, 'lineno')
                         print("[ Top 10 differences ]")
                         for stat in top_stats[:10]:
