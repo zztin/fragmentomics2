@@ -42,7 +42,7 @@ def display_top(snapshot, filename, i, key_type='lineno', limit=10):
     total = sum(stat.size for stat in top_stats)
     records.append("Total allocated size: %.1f KiB" % (total / 1024))
     print("Total allocated size: %.1f KiB" % (total / 1024))
-    with open(f"{args.out_path}/../{filename}.tracemalloc.log", "w+") as f:
+    with open(f"{args.out_path}/../{filename}.tracemalloc.log", "a+") as f:
         f.write("\n".join(records))
 
 
@@ -129,7 +129,7 @@ if __name__=="__main__":
 #                for stat in top_stats[:10]:
 #                    print(stat)
 
-                if i > 3855:
+                if i < 100 :
                         print('snapshot',i, )
                         print(m.span)
                         print(len(m.read_names))
