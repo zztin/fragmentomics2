@@ -145,7 +145,7 @@ setup(
         'singlecellmultiomics/FACS/trajectory.py',
         
         # Deduplication:
-        'singlecellmultiomics/cyclomicsConsensus/deduplication_cyclomicseq.py',
+        'singlecellmultiomics/bamProcessing/deduplication_cyclomicseq.py',
 
         ],
 
