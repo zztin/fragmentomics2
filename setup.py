@@ -141,10 +141,10 @@ setup(
         'singlecellmultiomics/snakemake_workflows/_general/slurm_wrapper.py',
 
         # Facs:
-        'singlecellmultiomics/FACS/trajectory.py'
+        'singlecellmultiomics/FACS/trajectory.py',
         
         # Deduplication:
-        'singlecellmultiomics/cyclomicsConsensus/deduplication_cyclomicseq.py'
+        'singlecellmultiomics/cyclomicsConsensus/deduplication_cyclomicseq.py',
 
         ],
 
