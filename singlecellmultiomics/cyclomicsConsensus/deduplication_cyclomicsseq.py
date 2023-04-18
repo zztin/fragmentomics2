@@ -23,7 +23,7 @@ def write_sm_tag_to_bam(input_bam, SM_bam, SM_tag_value):
     return SM_bam
 
 
-def write_deduplicate(input_bam_path, target_bam_path, reference, SM_tag_value):
+def write_deduplicate(input_bam_path, target_bam_path, reference, SM_tag_value, merge_max):
     with pysam.AlignmentFile(input_bam_path) as f:
         with sorted_bam_file(target_bam_path, origin_bam=f, ) as target_bam:
             for i, m in tqdm(enumerate(MoleculeIterator(
@@ -33,7 +33,7 @@ def write_deduplicate(input_bam_path, target_bam_path, reference, SM_tag_value):
                     every_fragment_as_molecule=False,
                     perform_qflag=False,
                     molecule_class_args={"reference": reference, "max_associated_fragments": 100},
-                    fragment_class_args={"assignment_radius": 4, "rca_tag": "YM", "sample": SM_tag_value},
+                    fragment_class_args={"assignment_radius": merge_max, "rca_tag": "YM", "sample": SM_tag_value},
                     max_buffer_size=1000000,
                     yield_overflow=False,
             ))):
@@ -53,8 +53,8 @@ if __name__=="__main__":
                     help='out bam including path')
     parser.add_argument('--SM', type=str, default=None, help="value to put in SM tag. Can skip is SM tag existed.")
     parser.add_argument('--ref', type=str, help='reference which bam file is mapped to. (str). Auto-detect is possible.')
-    parser.add_argument('--merge', action='store_true', help='merge reads from different nanopore reads but covering the same start,'
-                                                  'end sites within max 2bp range. Direction of the read is set by the first added read.')
+    parser.add_argument('--merge_max', type= int, default=5,
+                        help='Merge nanopore reads within max X bp range. Strand of the read is the first added read.')
 
     args = parser.parse_args()
 
@@ -88,7 +88,7 @@ if __name__=="__main__":
     else:
         input_bam = args.read_bam
 
-    write_deduplicate(input_bam, t_bam, reference, args.SM)
+    write_deduplicate(input_bam, t_bam, reference, args.SM, args.merge_max)
 
     pysam.index(str(t_bam))
 
