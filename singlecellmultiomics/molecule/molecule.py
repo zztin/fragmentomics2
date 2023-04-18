@@ -213,6 +213,7 @@ class Molecule():
 
         """
         self.kwargs = kwargs
+        self.other_tags = None
         self.reference = reference
         self.read_names = []
         self.rca_count = 0
@@ -567,7 +568,7 @@ class Molecule():
                 frag.set_meta('rt', rt_reaction_index)
                 frag.set_meta('rd', rt_duplicate_index)
                 frag.set_meta('rp', random_primer_start)
-        self.set_meta('TR', 0 if (rt_reaction_index is None) else rt_reaction_index + 1)
+        # self.set_meta('TR', 0 if (rt_reaction_index is None) else rt_reaction_index + 1)
 
         if self.allele_resolver is not None:
             self.write_allele_phasing_information_tag()
@@ -582,6 +583,8 @@ class Molecule():
                 self.methylation_call_dict, reads=reads)
 
         for read in reads:
+            for (tag, value) in self.other_tags:
+                read.set_tag(tag, value)
             read.set_tag('SM', self.sample)
 #            if hasattr(self, 'get_cut_site'):
 #                read.set_tag('DS', self.get_cut_site()[1])
@@ -1818,6 +1821,7 @@ class Molecule():
         if len(self.fragments) == 0:
             self._add_fragment(fragment)
             self.sample = fragment.sample
+            self.other_tags = fragment.other_tags
             return True
 
         if use_hash:

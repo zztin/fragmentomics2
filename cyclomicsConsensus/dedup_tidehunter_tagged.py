@@ -104,15 +104,16 @@ if __name__=="__main__":
                             every_fragment_as_molecule=False,
                             perform_qflag=False,
                             molecule_class_args={"reference": reference, "max_associated_fragments": 100},
-                            fragment_class_args={"assignment_radius": 4},
+                            fragment_class_args={"assignment_radius": 4, "rca_tag": "RC", "sample": args.SM},
                             max_buffer_size=1000000,
                             yield_overflow=False,
     
             )):
                 
 #                snapshot3 = tracemalloc.take_snapshot()
-                read_name = f'consensus_{m.get_a_reference_id()}_{i}'
-                # write tags to all fragments associated with the molecule
+                read_name = m.read_names[0]
+
+# write tags to all fragments associated with the molecule
 
                 snapshot1 = tracemalloc.take_snapshot()
 

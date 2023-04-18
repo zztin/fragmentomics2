@@ -2,6 +2,8 @@ import itertools
 from singlecellmultiomics.utils.sequtils import hamming_distance, get_consensus_dictionaries, pick_best_base_call
 import pysamiterators.iterators
 import singlecellmultiomics.modularDemultiplexer.baseDemultiplexMethods
+from singlecellmultiomics.modularDemultiplexer.baseDemultiplexMethods import TaggedRecord
+
 from singlecellmultiomics.utils import style_str
 from singlecellmultiomics.bamProcessing import get_read_group_from_read
 from singlecellmultiomics.features import FeatureAnnotatedObject
@@ -58,6 +60,8 @@ class Fragment():
                  library_name: str = None, # Overwrites the library name
                  single_end: bool = False,
                  read_name: str = None,
+                 rca_tag: str = None,
+                 sample: str = None,
                  ):
         """
         Initialise Fragment
@@ -98,6 +102,7 @@ class Fragment():
         if tag_definitions is None:
             tag_definitions = singlecellmultiomics.modularDemultiplexer.baseDemultiplexMethods.TagDefinitions
         self.tag_definitions = tag_definitions
+        self.other_tags = None
         self.assignment_radius = assignment_radius
         self.umi_hamming_distance = umi_hamming_distance
         self.mapping_dir = mapping_dir
@@ -118,7 +123,10 @@ class Fragment():
         self.qcfail = False
         self.single_end = single_end
         self.read_name = read_name
-        self.rca_count = 1
+        self.rca_count = None
+        self.rca_tag = rca_tag
+        self.sample = sample
+
 
         # Span:\
         self.span = [None, None, None]
@@ -141,7 +149,9 @@ class Fragment():
                 self.set_rejection_reason('HomoPolymer', set_qcfail=True)
                 self.qcfail=True
                 break
-
+            # Write other tags
+            if read.get_tags():
+                self.other_tags = read.get_tags()
             if read.is_qcfail:
                 self.qcfail = True
 
@@ -150,12 +160,11 @@ class Fragment():
                 self.unsafe_trimmed = True
                 self.R2_primer_length = 0 # Set R2 primer length to zero, as the primer has been removed
 
-            if read.has_tag('RN'):
-                self.read_name = read.get_tag('RN')
+            if self.read_name is None:
+                self.read_name = read.query_name
 
-            if read.has_tag('RC'):
-                self.rca_count = read.get_tag('RC')
-
+            if self.rca_tag is not None:
+                self.rca_count = read.get_tag(rca_tag)
 
             if not read.is_unmapped:
                 self.is_mapped = True
@@ -173,12 +182,14 @@ class Fragment():
             elif i == 1:
                 read.is_read1 = False
                 read.is_read2 = True
-        self.set_sample(library_name=library_name)
+        self.set_sample(sample=self.sample)
+
         self.update_umi()
         if self.qcfail:
             return
         self.set_strand(self.identify_strand())
         self.update_span()
+
 
 
     def write_tensor(self, chromosome=None, span_start=None, span_end=None, height=30, index_start=0,

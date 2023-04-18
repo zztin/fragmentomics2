@@ -399,6 +399,7 @@ class MoleculeIterator():
 
             if self.max_buffer_size is not None and self.waiting_fragments>self.max_buffer_size:
                 raise MemoryError(f'max_buffer_size exceeded with {self.waiting_fragments} waiting fragments')
+                # modify can be yield func if max buffer size exceeded
 
             if self.check_eject_every is not None and self.check_ejection_iter > self.check_eject_every:
                 current_chrom, _, current_position = fragment.get_span()
