@@ -51,7 +51,8 @@ setup(
         'singlecellmultiomics.tagtools',
         'singlecellmultiomics.universalBamTagger',
         'singlecellmultiomics.utils',
-        'singlecellmultiomics.modularDemultiplexer.demultiplexModules'
+        'singlecellmultiomics.modularDemultiplexer.demultiplexModules',
+        'singlecellmultiomics.cyclomicsConsensus'
         ],
 
 
