@@ -45,7 +45,7 @@ def write_deduplicate(input_bam_path, target_bam_path, reference, SM_tag_value, 
                               )
 
 
-if __name__=="__main__":
+def main():
     parser = argparse.ArgumentParser(description='Deduplicate base on molecular location.')
     parser.add_argument('--read_bam', type=str,
                     help='bam file path')
@@ -55,10 +55,8 @@ if __name__=="__main__":
     parser.add_argument('--ref', type=str, help='reference which bam file is mapped to. (str). Auto-detect is possible.')
     parser.add_argument('--merge_max', type= int, default=5,
                         help='Merge nanopore reads within max X bp range. Strand of the read is the first added read.')
-
     args = parser.parse_args()
 
-    timeA = time.time()
 
     out_bam = os.path.splitext(args.out_bam)[0]
     out_path = out_bam.split("/")[0]
@@ -67,7 +65,6 @@ if __name__=="__main__":
     SM_bam = f"{out_path}.SMtagged.sorted.bam"
     # deduplicated output bam
     t_bam = args.out_bam
-
     # autodetect reference:
     reference = None
     if args.ref is None:
@@ -89,12 +86,9 @@ if __name__=="__main__":
         input_bam = args.read_bam
 
     write_deduplicate(input_bam, t_bam, reference, args.SM, args.merge_max)
-
     pysam.index(str(t_bam))
-
     # cleanup_intermediate_files
     if args.SM is not None:
         os.remove(input_bam)
         os.remove(f'{input_bam}.bai')
 
-print((time.time() - timeA)/60, 'min')

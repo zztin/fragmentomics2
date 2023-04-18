@@ -145,11 +145,11 @@ setup(
         'singlecellmultiomics/FACS/trajectory.py',
         
         # Deduplication:
-        'singlecellmultiomics/bamProcessing/deduplication_cyclomicsseq.py',
+        'singlecellmultiomics/cyclomicsConsensus/deduplication_cyclomicsseq.py',
 
         ],
   entry_points={
-      'console_scripts': ['dedup=singlecellmultiomics.bamProcessing.deduplication_cyclomicsseq:main']
+      'console_scripts': ['dedup=singlecellmultiomics.cyclomicsConsensus.deduplication_cyclomicsseq:main']
   },
   install_requires=[
        'pysam>=0.15.3','numpy>=1.16.5','pandas>=0.25.0','colorama','pyBigWig',
