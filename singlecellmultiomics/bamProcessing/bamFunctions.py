@@ -168,7 +168,7 @@ def merge_bams( bams: list, output_path: str, threads: int=4 ):
             # This above command can have issues...
             os.system(f'samtools merge {output_path} {" ".join(bams)} -@ {threads} -f -p -c')
 
-        pysam.index(output_path, f'-@ {threads}')
+        pysam.index(output_path)
         for o in bams:
             os.remove(o)
             os.remove(o+'.bai')
@@ -697,7 +697,7 @@ def sort_and_index(
                 break
     else:
         pysam.sort("-o", sorted_path, unsorted_path, ('-l 1' if fast_compression else '-l 3'))
-    pysam.index(sorted_path, '-@ 4')
+    pysam.index(sorted_path)
     if remove_unsorted:
         os.remove(unsorted_path)
 

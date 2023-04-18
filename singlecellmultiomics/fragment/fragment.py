@@ -2,6 +2,8 @@ import itertools
 from singlecellmultiomics.utils.sequtils import hamming_distance, get_consensus_dictionaries, pick_best_base_call
 import pysamiterators.iterators
 import singlecellmultiomics.modularDemultiplexer.baseDemultiplexMethods
+from singlecellmultiomics.modularDemultiplexer.baseDemultiplexMethods import TaggedRecord
+
 from singlecellmultiomics.utils import style_str
 from singlecellmultiomics.bamProcessing import get_read_group_from_read
 from singlecellmultiomics.features import FeatureAnnotatedObject
@@ -56,7 +58,10 @@ class Fragment():
                  max_NUC_stretch: int = None,
                  read_group_format: int = 0,  # R1 forward, R2 reverse
                  library_name: str = None, # Overwrites the library name
-                 single_end: bool = False
+                 single_end: bool = False,
+                 read_name: str = None,
+                 rca_tag: str = None,
+                 sample: str = None,
                  ):
         """
         Initialise Fragment
@@ -97,6 +102,7 @@ class Fragment():
         if tag_definitions is None:
             tag_definitions = singlecellmultiomics.modularDemultiplexer.baseDemultiplexMethods.TagDefinitions
         self.tag_definitions = tag_definitions
+        self.other_tags = None
         self.assignment_radius = assignment_radius
         self.umi_hamming_distance = umi_hamming_distance
         self.mapping_dir = mapping_dir
@@ -116,6 +122,11 @@ class Fragment():
         self.max_NUC_stretch = max_NUC_stretch
         self.qcfail = False
         self.single_end = single_end
+        self.read_name = read_name
+        self.rca_count = None
+        self.rca_tag = rca_tag
+        self.sample = sample
+
 
         # Span:\
         self.span = [None, None, None]
@@ -138,7 +149,9 @@ class Fragment():
                 self.set_rejection_reason('HomoPolymer', set_qcfail=True)
                 self.qcfail=True
                 break
-
+            # Write other tags
+            if read.get_tags():
+                self.other_tags = read.get_tags()
             if read.is_qcfail:
                 self.qcfail = True
 
@@ -146,6 +159,12 @@ class Fragment():
                 self.random_primer_sequence = read.get_tag('rS')
                 self.unsafe_trimmed = True
                 self.R2_primer_length = 0 # Set R2 primer length to zero, as the primer has been removed
+
+            if self.read_name is None:
+                self.read_name = read.query_name
+
+            if self.rca_tag is not None:
+                self.rca_count = read.get_tag(rca_tag)
 
             if not read.is_unmapped:
                 self.is_mapped = True
@@ -163,12 +182,14 @@ class Fragment():
             elif i == 1:
                 read.is_read1 = False
                 read.is_read2 = True
-        self.set_sample(library_name=library_name)
+        self.set_sample(sample=self.sample)
+
         self.update_umi()
         if self.qcfail:
             return
         self.set_strand(self.identify_strand())
         self.update_span()
+
 
 
     def write_tensor(self, chromosome=None, span_start=None, span_end=None, height=30, index_start=0,
@@ -700,8 +721,8 @@ class Fragment():
         Extract umi from 'RX' tag and store the UMI in the Fragment object
         """
         for read in self.reads:
-            if read is not None and read.has_tag('RX'):
-                self.umi = read.get_tag('RX')
+            if read is not None and read.has_tag('BX'):
+                self.umi = read.get_tag('BX')
 
     def get_umi(self):
         """
@@ -750,11 +771,15 @@ class Fragment():
 
         if self.umi == other.umi:
             return True
+        if self.umi == 'NotFound':
+            return True
         if self.umi_hamming_distance == 0:
             return False
         else:
+            # one is NotFound, one is XXXX
             if len(self.umi)!=len(other.umi):
-                return False
+                return True
+            # This doesn't take into account of distance from a base to X
             return hamming_distance(
                 self.umi, other.umi) <= self.umi_hamming_distance
 
@@ -852,23 +877,32 @@ class Fragment():
             False
 
         """
-        if self.sample != other.sample:
-            return False
+        # if self.sample != other.sample:
+        #     return False
 
-        if self.strand != other.strand:
-            return False
+        # if self.strand != other.strand:
+        #     return False
+        if self.read_name in other.read_names:
+            if self.span[0] != other.span[0]:
+                return False
+            if self.span[2] - other.span[1] < 0:
+                return False
+            elif other.span[2] - self.span[1] < 0:
+                return False
+            return True
 
         if not self.has_valid_span() or not other.has_valid_span():
             return False
 
-        if min(abs(self.span[1] -
-                   other.span[1]), abs(self.span[2] -
-                                       other.span[2])) > self.assignment_radius:
+
+        if min(abs(self.span[1] - other.span[1]), abs(self.span[2] - other.span[2])) > self.assignment_radius:
             return False
 
-        # Make sure UMI's are similar enough, more expensive hamming distance
-        # calculation
-        return self.umi_eq(other)
+
+
+
+        # Disable umi calculation
+        return True
 
     def __getitem__(self, index):
         """

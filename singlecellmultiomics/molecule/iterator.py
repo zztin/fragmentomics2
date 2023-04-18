@@ -399,6 +399,7 @@ class MoleculeIterator():
 
             if self.max_buffer_size is not None and self.waiting_fragments>self.max_buffer_size:
                 raise MemoryError(f'max_buffer_size exceeded with {self.waiting_fragments} waiting fragments')
+                # modify can be yield func if max buffer size exceeded
 
             if self.check_eject_every is not None and self.check_ejection_iter > self.check_eject_every:
                 current_chrom, _, current_position = fragment.get_span()
@@ -433,6 +434,7 @@ class MoleculeIterator():
                             m = self.molecules_per_cell[hash_group].pop(i - j)
                             m.__finalise__()
                             yield from self.yield_func(m)
+#??                         self._clear_cache()
 
         # Yield remains
         if self.pooling_method == 0:

@@ -20,12 +20,13 @@ class CHICMolecule(Molecule):
 
         # Extracted from fragments:
         self.assignment_radius=None
+        self.read_names = None
 
 
 
     def _add_fragment(self,fragment):
         # Update the cut coordinate tho the (left most extreme value)
-        self.assignment_radius =fragment.assignment_radius
+        self.assignment_radius = fragment.assignment_radius
 
         if fragment.site_location is not None:
 
@@ -38,7 +39,8 @@ class CHICMolecule(Molecule):
                 self.site_location[1] = min(fragment.site_location[1], self.site_location[1]) # this is the coordinate
 
         # else : writing a fragment which has no cut location associated
-
+        if self.read_name is None:
+            self.read_name = fragment.read_names
         Molecule._add_fragment(self, fragment)
 
 
@@ -60,7 +62,8 @@ class CHICMolecule(Molecule):
         if self.assignment_radius is not None and self.assignment_radius>0 and len(self)>1:
             for frag in self:
                 frag.set_meta('DS', self.site_location[1])
-
+        if self.read_name is not None:
+            self.set_meta('RN', self.read_name)
         Molecule.write_tags(self)
 
     def is_valid(self, set_rejection_reasons=False):

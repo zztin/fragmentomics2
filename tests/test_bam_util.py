@@ -200,7 +200,7 @@ class TestSorted(unittest.TestCase):
     def  test_sample_extraction(self):
 
         output_path= './data/write_test_extract.bam'
-        final_output_paths= ['./data/write_test_extract0.bam', './data/write_test_extract1.bam']
+        final_output_paths= ['./data/write_test_extract_0.bam', './data/write_test_extract_1.bam']
 
         capture_samples = {'0':['APKS1P25-NLAP2L1_30','APKS1P25-NLAP2L1_31'],
         # 4 reads expected

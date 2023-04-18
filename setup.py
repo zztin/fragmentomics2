@@ -142,6 +142,9 @@ setup(
 
         # Facs:
         'singlecellmultiomics/FACS/trajectory.py'
+        
+        # Deduplication:
+        'singlecellmultiomics/cyclomicsConsensus/deduplication_cyclomicseq.py'
 
         ],
 

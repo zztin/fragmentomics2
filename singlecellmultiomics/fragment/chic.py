@@ -30,7 +30,7 @@ class CHICFragment(Fragment):
                           R1_primer_length=R1_primer_length,
                           R2_primer_length=R2_primer_length,
                           umi_hamming_distance=umi_hamming_distance,
-                          max_NUC_stretch = 18,
+                          max_NUC_stretch=18,
                           **kwargs
 
                 )
@@ -189,7 +189,9 @@ class CHICFragment(Fragment):
         if self.site_location is None or other.site_location is None:
             return False
 
-        # Check distance between the fragments:
+        # Check distance between the fragments: --> change to check if they overlap
+        # self.span[1] # start
+        # self.span[2] # end
         if self.assignment_radius>0 and abs(self.site_location[1]-other.site_location[1])>self.assignment_radius:
             return False
 
