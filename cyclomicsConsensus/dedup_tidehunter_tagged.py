@@ -13,37 +13,37 @@ import argparse
 import time
 import linecache
 import os
-import tracemalloc
+#import tracemalloc
 
-def display_top(snapshot, filename, i, key_type='lineno', limit=10):
-    snapshot = snapshot.filter_traces((
-        tracemalloc.Filter(False, "<frozen importlib._bootstrap>"),
-        tracemalloc.Filter(False, "<unknown>"),
-    ))
-    top_stats = snapshot.statistics(key_type)
-    records = []
-    records.append("Top %s lines by molecule no.%s" % (limit, i))
-    print("Top %s lines" % limit)
-    for index, stat in enumerate(top_stats[:limit], 1):
-        frame = stat.traceback[0]
-        print("#%s: %s:%s: %.1f KiB" % (index, frame.filename, frame.lineno, stat.size / 1024))
-        records.append("#%s: %s:%s: %.1f KiB"
-              % (index, frame.filename, frame.lineno, stat.size / 1024))
-        line = linecache.getline(frame.filename, frame.lineno).strip()
-        if line:
-            records.append('    %s' % line)
-            print('   %s' % line)
-
-    other = top_stats[limit:]
-    if other:
-        size = sum(stat.size for stat in other)
-        records.append("%s other: %.1f KiB" % (len(other), size / 1024))
-        print("%s other: %.1f KiB" % (len(other), size / 1024))
-    total = sum(stat.size for stat in top_stats)
-    records.append("Total allocated size: %.1f KiB" % (total / 1024))
-    print("Total allocated size: %.1f KiB" % (total / 1024))
-    with open(f"{args.out_path}/../{filename}.tracemalloc.log", "w+") as f:
-        f.write("\n".join(records))
+#def display_top(snapshot, filename, i, key_type='lineno', limit=10):
+#    snapshot = snapshot.filter_traces((
+#        tracemalloc.Filter(False, "<frozen importlib._bootstrap>"),
+#        tracemalloc.Filter(False, "<unknown>"),
+#    ))
+#    top_stats = snapshot.statistics(key_type)
+#    records = []
+#    records.append("Top %s lines by molecule no.%s" % (limit, i))
+#    print("Top %s lines" % limit)
+#    for index, stat in enumerate(top_stats[:limit], 1):
+#        frame = stat.traceback[0]
+#        print("#%s: %s:%s: %.1f KiB" % (index, frame.filename, frame.lineno, stat.size / 1024))
+#        records.append("#%s: %s:%s: %.1f KiB"
+#              % (index, frame.filename, frame.lineno, stat.size / 1024))
+#        line = linecache.getline(frame.filename, frame.lineno).strip()
+#        if line:
+#            records.append('    %s' % line)
+#            print('   %s' % line)
+#
+#    other = top_stats[limit:]
+#    if other:
+#        size = sum(stat.size for stat in other)
+#        records.append("%s other: %.1f KiB" % (len(other), size / 1024))
+#        print("%s other: %.1f KiB" % (len(other), size / 1024))
+#    total = sum(stat.size for stat in top_stats)
+#    records.append("Total allocated size: %.1f KiB" % (total / 1024))
+#    print("Total allocated size: %.1f KiB" % (total / 1024))
+#    with open(f"{args.out_path}/../{filename}.tracemalloc.log", "a+") as f:
+#        f.write("\n".join(records))
 
 
 
@@ -61,7 +61,7 @@ if __name__=="__main__":
                                                   'end sites within max 2bp range. Direction of the read is set by the first added read.')
 
     args = parser.parse_args()
-    SM_bam = f"{args.out_path}/{args.prefix}_{pid}_test.SMtagged.sorted.bam"
+    SM_bam = f"{args.out_path}/{args.prefix}_{pid}.SMtagged.sorted.bam"
     t_bam = f"{args.out_path}/{args.prefix}_{pid}_deduplicated_samecoor.tagged.bam"
 
     # autodetect reference:
@@ -90,7 +90,8 @@ if __name__=="__main__":
 
 
 
-    tracemalloc.start()
+#    tracemalloc.start()
+
     with pysam.AlignmentFile(SM_bam) as f:
         
        
@@ -103,11 +104,10 @@ if __name__=="__main__":
                             fragmentClass=CHICFragment,
                             every_fragment_as_molecule=False,
                             perform_qflag=False,
-                            molecule_class_args={"reference": reference, "max_associated_fragments": 100},
+                            molecule_class_args={"reference": reference, "max_associated_fragments": 200},
                             fragment_class_args={"assignment_radius": 4, "rca_tag": "RC", "sample": args.SM},
                             max_buffer_size=1000000,
                             yield_overflow=False,
-    
             )):
                 
 #                snapshot3 = tracemalloc.take_snapshot()
@@ -115,7 +115,7 @@ if __name__=="__main__":
 
 # write tags to all fragments associated with the molecule
 
-                snapshot1 = tracemalloc.take_snapshot()
+#                snapshot1 = tracemalloc.take_snapshot()
 
                 m.write_tags()
 
@@ -130,18 +130,18 @@ if __name__=="__main__":
 #                for stat in top_stats[:10]:
 #                    print(stat)
 
-                if i > 3855:
-                        print('snapshot',i, )
-                        print(m.span)
-                        print(len(m.read_names))
-                        print(m.overflow_fragments)
-                        print(len(m.fragments))
-                        snapshot2 = tracemalloc.take_snapshot()
-                        display_top(snapshot2, filename=f'{args.prefix}_{pid}', i = i)
-                        top_stats = snapshot2.compare_to(snapshot1, 'lineno')
-                        print("[ Top 10 differences ]")
-                        for stat in top_stats[:10]:
-                            print(stat)
+#                if i < 100 :
+#                        print('snapshot',i, )
+#                        print(m.span)
+#                        print(len(m.read_names))
+#                        print(m.overflow_fragments)
+#                        print(len(m.fragments))
+#                        snapshot2 = tracemalloc.take_snapshot()
+#                        display_top(snapshot2, filename=f'{args.prefix}_{pid}', i = "-".join([str(i) for i in m.span]))
+#                        top_stats = snapshot2.compare_to(snapshot1, 'lineno')
+#                        print("[ Top 10 differences ]")
+#                        for stat in top_stats[:10]:
+#                            print(stat)
 
 
     pysam.index(t_bam, f'{t_bam}.bai')
