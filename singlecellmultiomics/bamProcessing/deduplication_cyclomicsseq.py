@@ -45,7 +45,7 @@ def write_deduplicate(input_bam_path, target_bam_path, reference, SM_tag_value):
                               )
 
 
-if __name__=="__main__":
+def main():
     parser = argparse.ArgumentParser(description='Deduplicate base on molecular location.')
     parser.add_argument('--read_bam', type=str,
                     help='bam file path')
@@ -97,4 +97,4 @@ if __name__=="__main__":
         os.remove(input_bam)
         os.remove(f'{input_bam}.bai')
 
-print((time.time() - timeA)/60, 'min')
+    print((time.time() - timeA)/60, 'min')

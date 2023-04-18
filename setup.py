@@ -58,83 +58,83 @@ setup(
 
     scripts=[
         # Demultiplexing
-        'singlecellmultiomics/modularDemultiplexer/demux.py',
-
-        # Fasta
-        'singlecellmultiomics/fastaProcessing/fastaMaskVariants.py',
-        'singlecellmultiomics/fastaProcessing/createMappabilityIndex.py',
-        'singlecellmultiomics/fastaProcessing/fastaCreateDict.py',
-
-        # Tagging
-        'singlecellmultiomics/universalBamTagger/universalBamTagger.py',
-        'singlecellmultiomics/universalBamTagger/bamtagmultiome_multi.py',
-        'singlecellmultiomics/universalBamTagger/bamtagmultiome.py',
-        'singlecellmultiomics/universalBamTagger/tapsTagger.py',
-        'singlecellmultiomics/universalBamTagger/tapsTabulator.py',
-        'singlecellmultiomics/universalBamTagger/4SUtagger.py',
-
-        # Methylation:
-        'singlecellmultiomics/methylation/methylationtab_to_bed.py',
-        'singlecellmultiomics/methylation/bam_to_methylation_bw.py',
-
-        # Bam processing:
-        'singlecellmultiomics/bamProcessing/bamTabulator.py',
-        'singlecellmultiomics/bamProcessing/bamToNucleosomePositions.py',
-        'singlecellmultiomics/bamProcessing/bamAnalyzeCutDistances.py',
-        'singlecellmultiomics/bamProcessing/bamSplitByTag.py',
-        'singlecellmultiomics/bamProcessing/bamReadGroupFormat.py',
-        'singlecellmultiomics/bamProcessing/bamToCountTable.py',
-        'singlecellmultiomics/bamProcessing/bamCopyNumber.py',
-        'singlecellmultiomics/bamProcessing/bamExtractSamples.py',
-        'singlecellmultiomics/bamProcessing/scmoConvert.py',
-        'singlecellmultiomics/bamProcessing/bamToMethylationAndCopyNumber.py',
-        'singlecellmultiomics/bamProcessing/bamDinucleotideDistribution.py',
-        'singlecellmultiomics/bamProcessing/bamToMethylationCalls.py',
-        'singlecellmultiomics/bamProcessing/bamMappingRate.py',
-        'singlecellmultiomics/bamProcessing/bamFilter.py',
-        'singlecellmultiomics/bamProcessing/bamPlotRTstats.py',
-        'singlecellmultiomics/bamProcessing/bamPlateVisualisation.py',
-        'singlecellmultiomics/bamProcessing/bamFeatureDensityVisualisation.py',
-        'singlecellmultiomics/bamProcessing/bamMethylationCutDistance.py',
-        'singlecellmultiomics/bamProcessing/bamDuprate.py',
-        'singlecellmultiomics/bamProcessing/bamExtractRandomPrimerStats.py',
-        'singlecellmultiomics/bamProcessing/bamToRNACounts.py',
-        'singlecellmultiomics/bamProcessing/bamToBigWig.py',
-        'singlecellmultiomics/bamProcessing/structureTensor.py',
-        'singlecellmultiomics/bamProcessing/bamCompare.py',
-        'singlecellmultiomics/bamProcessing/variantStats.py',
-        'singlecellmultiomics/bamProcessing/bamExtractVariants.py',
-        'singlecellmultiomics/bamProcessing/bamMatchGATKBQSRReport.py',
-        'singlecellmultiomics/bamProcessing/bamBinCounts.py',
-        'singlecellmultiomics/bamProcessing/bamExtractNearMolecules.py',
-        'singlecellmultiomics/bamProcessing/split_double_BAM.py',
-        'singlecellmultiomics/bamProcessing/bamOverseq.py',
-        'singlecellmultiomics/bamProcessing/plotRegion.py',
-        'singlecellmultiomics/bamProcessing/soft_clip_filter.py',
-        'singlecellmultiomics/utils/base_call_covariates.py',
-        'singlecellmultiomics/bamProcessing/estimateTapsConversionEfficiency.py',
-
-        # Library processing:
-        'singlecellmultiomics/libraryProcessing/libraryStatistics.py',
-        'singlecellmultiomics/libraryDetection/archivestats.py',
-        'singlecellmultiomics/alleleTools/heterozygousSNPedit.py',
-
-        # Feature conversion:
-        'singlecellmultiomics/features/exonGTFtoIntronGTF.py',
-
-        # Variants:
-        'singlecellmultiomics/variants/postProcessVariants.py',
-        'singlecellmultiomics/variants/vcfFilterAlleleFreq.py',
-        'singlecellmultiomics/variants/vcfMutProfiler.py',
-        'singlecellmultiomics/variants/plotCovariates.py',
-
-        # Trimming:
-        'singlecellmultiomics/fastqProcessing/trim_vasa.py',
-
-        'singlecellmultiomics/utils/bigWigDiff.py',
-        # Utility: (SGE wrapper)
-        'singlecellmultiomics/utils/submission.py',
-        'singlecellmultiomics/utils/ftp_upload.py',
+        # 'singlecellmultiomics/modularDemultiplexer/demux.py',
+        #
+        # # Fasta
+        # 'singlecellmultiomics/fastaProcessing/fastaMaskVariants.py',
+        # 'singlecellmultiomics/fastaProcessing/createMappabilityIndex.py',
+        # 'singlecellmultiomics/fastaProcessing/fastaCreateDict.py',
+        #
+        # # Tagging
+        # 'singlecellmultiomics/universalBamTagger/universalBamTagger.py',
+        # 'singlecellmultiomics/universalBamTagger/bamtagmultiome_multi.py',
+        # 'singlecellmultiomics/universalBamTagger/bamtagmultiome.py',
+        # 'singlecellmultiomics/universalBamTagger/tapsTagger.py',
+        # 'singlecellmultiomics/universalBamTagger/tapsTabulator.py',
+        # 'singlecellmultiomics/universalBamTagger/4SUtagger.py',
+        #
+        # # Methylation:
+        # 'singlecellmultiomics/methylation/methylationtab_to_bed.py',
+        # 'singlecellmultiomics/methylation/bam_to_methylation_bw.py',
+        #
+        # # Bam processing:
+        # 'singlecellmultiomics/bamProcessing/bamTabulator.py',
+        # 'singlecellmultiomics/bamProcessing/bamToNucleosomePositions.py',
+        # 'singlecellmultiomics/bamProcessing/bamAnalyzeCutDistances.py',
+        # 'singlecellmultiomics/bamProcessing/bamSplitByTag.py',
+        # 'singlecellmultiomics/bamProcessing/bamReadGroupFormat.py',
+        # 'singlecellmultiomics/bamProcessing/bamToCountTable.py',
+        # 'singlecellmultiomics/bamProcessing/bamCopyNumber.py',
+        # 'singlecellmultiomics/bamProcessing/bamExtractSamples.py',
+        # 'singlecellmultiomics/bamProcessing/scmoConvert.py',
+        # 'singlecellmultiomics/bamProcessing/bamToMethylationAndCopyNumber.py',
+        # 'singlecellmultiomics/bamProcessing/bamDinucleotideDistribution.py',
+        # 'singlecellmultiomics/bamProcessing/bamToMethylationCalls.py',
+        # 'singlecellmultiomics/bamProcessing/bamMappingRate.py',
+        # 'singlecellmultiomics/bamProcessing/bamFilter.py',
+        # 'singlecellmultiomics/bamProcessing/bamPlotRTstats.py',
+        # 'singlecellmultiomics/bamProcessing/bamPlateVisualisation.py',
+        # 'singlecellmultiomics/bamProcessing/bamFeatureDensityVisualisation.py',
+        # 'singlecellmultiomics/bamProcessing/bamMethylationCutDistance.py',
+        # 'singlecellmultiomics/bamProcessing/bamDuprate.py',
+        # 'singlecellmultiomics/bamProcessing/bamExtractRandomPrimerStats.py',
+        # 'singlecellmultiomics/bamProcessing/bamToRNACounts.py',
+        # 'singlecellmultiomics/bamProcessing/bamToBigWig.py',
+        # 'singlecellmultiomics/bamProcessing/structureTensor.py',
+        # 'singlecellmultiomics/bamProcessing/bamCompare.py',
+        # 'singlecellmultiomics/bamProcessing/variantStats.py',
+        # 'singlecellmultiomics/bamProcessing/bamExtractVariants.py',
+        # 'singlecellmultiomics/bamProcessing/bamMatchGATKBQSRReport.py',
+        # 'singlecellmultiomics/bamProcessing/bamBinCounts.py',
+        # 'singlecellmultiomics/bamProcessing/bamExtractNearMolecules.py',
+        # 'singlecellmultiomics/bamProcessing/split_double_BAM.py',
+        # 'singlecellmultiomics/bamProcessing/bamOverseq.py',
+        # 'singlecellmultiomics/bamProcessing/plotRegion.py',
+        # 'singlecellmultiomics/bamProcessing/soft_clip_filter.py',
+        # 'singlecellmultiomics/utils/base_call_covariates.py',
+        # 'singlecellmultiomics/bamProcessing/estimateTapsConversionEfficiency.py',
+        #
+        # # Library processing:
+        # 'singlecellmultiomics/libraryProcessing/libraryStatistics.py',
+        # 'singlecellmultiomics/libraryDetection/archivestats.py',
+        # 'singlecellmultiomics/alleleTools/heterozygousSNPedit.py',
+        #
+        # # Feature conversion:
+        # 'singlecellmultiomics/features/exonGTFtoIntronGTF.py',
+        #
+        # # Variants:
+        # 'singlecellmultiomics/variants/postProcessVariants.py',
+        # 'singlecellmultiomics/variants/vcfFilterAlleleFreq.py',
+        # 'singlecellmultiomics/variants/vcfMutProfiler.py',
+        # 'singlecellmultiomics/variants/plotCovariates.py',
+        #
+        # # Trimming:
+        # 'singlecellmultiomics/fastqProcessing/trim_vasa.py',
+        #
+        # 'singlecellmultiomics/utils/bigWigDiff.py',
+        # # Utility: (SGE wrapper)
+        # 'singlecellmultiomics/utils/submission.py',
+        # 'singlecellmultiomics/utils/ftp_upload.py',
 
         #Worfklow
         'singlecellmultiomics/snakemake_workflows/scmo_workflow.py',
@@ -145,10 +145,12 @@ setup(
         'singlecellmultiomics/FACS/trajectory.py',
         
         # Deduplication:
-        'singlecellmultiomics/cyclomicsConsensus/deduplication_cyclomicsseq.py',
+        'singlecellmultiomics/bamProcessing/deduplication_cyclomicsseq.py',
 
         ],
-
+  entry_points={
+      'console_scripts': ['dedup=singlecellmultiomics.bamProcessing.deduplication_cyclomicsseq:main']
+  },
   install_requires=[
        'pysam>=0.15.3','numpy>=1.16.5','pandas>=0.25.0','colorama','pyBigWig',
        'cutadapt>=2.9',
