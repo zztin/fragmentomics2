@@ -763,6 +763,9 @@ def run_multiome_tagging(args):
         # Write all reads
         yield_invalid = True
 
+    # elif args.method == 'cyclomics':
+    #     moleculeClass = singlecellmultiomics.molecule.CycMolecule
+    #     fragmentClass = singlecellmultiomics.fragment.CycFragment
         bp_per_job = 3_000_000
         bp_per_segment = 3_000_000
         fragment_size = 0

@@ -30,6 +30,11 @@ share/python-wheels/
 _build
 _static
 _templates
+
+#Pycharm
+.idea/
+.DS_Store
+
 dev/
 data/test
 data/cyclomics/
