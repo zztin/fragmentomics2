@@ -157,7 +157,7 @@ setup(
        'pysamiterators>=1.9','more-itertools','matplotlib','tabulate',
        'wheel','setuptools>=40.8.0','scikit-learn>=0.21.3','seaborn>=0.11.0', 'statsmodels', 'cached_property',
        'biopython>=1.71','pytest>=5.0.0','pytest-runner','snakemake>=5.8.1','lxml',
-       'tqdm>=4.65.0',
+       'tqdm>=4.61.0',
        #,'tensorflow>=1.14.0'
    ],
     setup_requires=["pytest-runner"],
